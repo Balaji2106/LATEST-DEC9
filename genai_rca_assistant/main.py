@@ -1676,8 +1676,9 @@ async def handle_remediation_failure(ticket_id: str, pipeline_name: str,
                                       error_type: str, attempt_number: int,
                                       run_data: dict):
     """
-    Called when remediation pipeline run fails
-    - Checks if retries available
+    Called when remediation pipeline run fails (AI-driven)
+    - Retrieves AI decisions from ticket's RCA data
+    - Checks if retries available based on risk level
     - Triggers retry or escalates to manual
     """
     logger.warning(f"[AUTO-REM] ❌ Auto-remediation attempt {attempt_number} failed for {ticket_id}")
@@ -1700,26 +1701,63 @@ async def handle_remediation_failure(ticket_id: str, pipeline_name: str,
         details=json.dumps({"attempt": attempt_number, "error_type": error_type, "failure_reason": failure_reason})
     )
 
-    # Check if we can retry
-    if error_type in REMEDIABLE_ERRORS:
-        max_retries = REMEDIABLE_ERRORS[error_type]["max_retries"]
+    # Get AI decisions from ticket's RCA data
+    ticket = db_query("SELECT rca_result FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
+    if not ticket or not ticket.get("rca_result"):
+        logger.error(f"[AUTO-REM] No RCA data found for ticket {ticket_id}, cannot determine retry strategy")
+        await handle_max_retries_exceeded(ticket_id, pipeline_name, error_type, failure_reason)
+        return
 
-        if attempt_number < max_retries:
-            # Retry available
-            logger.info(f"[AUTO-REM] Retrying auto-remediation (attempt {attempt_number + 1}/{max_retries})")
-
-            # Send Slack notification about retry
-            await send_slack_remediation_retry(ticket_id, pipeline_name, attempt_number + 1, max_retries)
-
-            # Trigger next attempt
-            await trigger_auto_remediation(
-                ticket_id, pipeline_name, error_type,
-                original_run_id, attempt_number + 1
-            )
+    # Parse RCA result to get AI decisions
+    try:
+        rca_result = ticket["rca_result"]
+        if isinstance(rca_result, str):
+            rca = json.loads(rca_result)
         else:
-            # Max retries exceeded
+            rca = rca_result
+
+        remediation_action = rca.get("remediation_action", "retry_pipeline")
+        remediation_risk = rca.get("remediation_risk", "Medium")
+        is_auto_remediable = rca.get("is_auto_remediable", False)
+
+        if not is_auto_remediable:
+            logger.info(f"[AUTO-REM] AI determined not auto-remediable, escalating to manual")
             await handle_max_retries_exceeded(ticket_id, pipeline_name, error_type, failure_reason)
+            return
+
+        # Get retry configuration based on AI-determined risk level
+        retry_config = DEFAULT_RETRY_SCHEDULES.get(remediation_risk, DEFAULT_RETRY_SCHEDULES["Medium"])
+        max_retries = retry_config["max_retries"]
+
+        logger.info(f"[AUTO-REM] AI decisions - Action: {remediation_action}, Risk: {remediation_risk}, Max retries: {max_retries}")
+
+    except Exception as e:
+        logger.error(f"[AUTO-REM] Failed to parse RCA data: {e}, using default retry strategy")
+        remediation_action = "retry_pipeline"
+        remediation_risk = "Medium"
+        max_retries = 2
+
+    # Check if we can retry
+    if attempt_number < max_retries:
+        # Retry available
+        logger.info(f"[AUTO-REM] Retrying auto-remediation (attempt {attempt_number + 1}/{max_retries})")
+
+        # Send Slack notification about retry
+        await send_slack_remediation_retry(ticket_id, pipeline_name, attempt_number + 1, max_retries)
+
+        # Trigger next attempt with AI decisions
+        await trigger_auto_remediation(
+            ticket_id=ticket_id,
+            pipeline_name=pipeline_name,
+            error_type=error_type,
+            original_run_id=original_run_id,
+            attempt_number=attempt_number + 1,
+            remediation_action=remediation_action,
+            remediation_risk=remediation_risk
+        )
     else:
+        # Max retries exceeded
+        logger.warning(f"[AUTO-REM] Max retries ({max_retries}) exceeded for risk level '{remediation_risk}'")
         await handle_max_retries_exceeded(ticket_id, pipeline_name, error_type, failure_reason)
 
 
