@@ -33,13 +33,17 @@
                             },
                             "databricks_workspace_url": {
                                 "type": "string"
+                            },
+                            "databricks_token": {
+                                "type": "string"
                             }
                         },
                         "required": [
                             "job_name",
                             "ticket_id",
                             "callback_url",
-                            "databricks_workspace_url"
+                            "databricks_workspace_url",
+                            "databricks_token"
                         ]
                     }
                 }
@@ -75,14 +79,11 @@
                     "uri": "@concat('https://', triggerBody()?['databricks_workspace_url'], '/api/2.1/jobs/run-now')",
                     "method": "POST",
                     "headers": {
-                        "Content-Type": "application/json"
+                        "Content-Type": "application/json",
+                        "Authorization": "@concat('Bearer ', triggerBody()?['databricks_token'])"
                     },
                     "body": {
                         "job_id": "@triggerBody()?['job_id']"
-                    },
-                    "authentication": {
-                        "type": "ManagedServiceIdentity",
-                        "audience": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
                     }
                 },
                 "runAfter": {
@@ -116,9 +117,8 @@
                         "inputs": {
                             "uri": "@concat('https://', triggerBody()?['databricks_workspace_url'], '/api/2.1/jobs/runs/get?run_id=', variables('RunId'))",
                             "method": "GET",
-                            "authentication": {
-                                "type": "ManagedServiceIdentity",
-                                "audience": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+                            "headers": {
+                                "Authorization": "@concat('Bearer ', triggerBody()?['databricks_token'])"
                             }
                         }
                     },
