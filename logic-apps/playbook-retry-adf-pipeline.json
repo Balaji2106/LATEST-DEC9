@@ -1,0 +1,270 @@
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "triggers": {
+            "When_RCA_sends_auto_remediation_request": {
+                "type": "Request",
+                "kind": "Http",
+                "inputs": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "pipeline_name": {
+                                "type": "string"
+                            },
+                            "ticket_id": {
+                                "type": "string"
+                            },
+                            "error_type": {
+                                "type": "string"
+                            },
+                            "original_run_id": {
+                                "type": "string"
+                            },
+                            "retry_attempt": {
+                                "type": "integer"
+                            },
+                            "max_retries": {
+                                "type": "integer"
+                            },
+                            "remediation_action": {
+                                "type": "string"
+                            },
+                            "timestamp": {
+                                "type": "string"
+                            },
+                            "callback_url": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "pipeline_name",
+                            "ticket_id",
+                            "callback_url"
+                        ]
+                    }
+                }
+            }
+        },
+        "actions": {
+            "Initialize_Variables": {
+                "type": "InitializeVariable",
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "PipelineStatus",
+                            "type": "string",
+                            "value": "InProgress"
+                        },
+                        {
+                            "name": "RunId",
+                            "type": "string",
+                            "value": ""
+                        },
+                        {
+                            "name": "AttemptNumber",
+                            "type": "integer",
+                            "value": "@triggerBody()?['retry_attempt']"
+                        }
+                    ]
+                },
+                "runAfter": {}
+            },
+            "Create_a_pipeline_run": {
+                "type": "ApiConnection",
+                "inputs": {
+                    "host": {
+                        "connection": {
+                            "name": "@parameters('$connections')['azuredatafactory']['connectionId']"
+                        }
+                    },
+                    "method": "post",
+                    "path": "/subscriptions/@{encodeURIComponent('d28a053b-ed09-40dd-92d6-43401a2c9799')}/resourcegroups/@{encodeURIComponent('rg_techdemo_2025_Q4')}/providers/Microsoft.DataFactory/factories/@{encodeURIComponent('adf-techdemo-rca')}/pipelines/@{encodeURIComponent(triggerBody()?['pipeline_name'])}/CreateRun",
+                    "queries": {
+                        "x-ms-api-version": "2017-09-01-preview"
+                    }
+                },
+                "runAfter": {
+                    "Initialize_Variables": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Set_RunId": {
+                "type": "SetVariable",
+                "inputs": {
+                    "name": "RunId",
+                    "value": "@body('Create_a_pipeline_run')?['runId']"
+                },
+                "runAfter": {
+                    "Create_a_pipeline_run": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Monitor_Pipeline_Until_Complete": {
+                "type": "Until",
+                "expression": "@or(or(or(equals(variables('PipelineStatus'), 'Succeeded'), equals(variables('PipelineStatus'), 'Failed')), equals(variables('PipelineStatus'), 'Cancelled')), equals(variables('PipelineStatus'), 'Canceled'))",
+                "limit": {
+                    "count": 60,
+                    "timeout": "PT1H"
+                },
+                "actions": {
+                    "Get_Pipeline_Run_Status": {
+                        "type": "Http",
+                        "inputs": {
+                            "uri": "https://management.azure.com/subscriptions/d28a053b-ed09-40dd-92d6-43401a2c9799/resourceGroups/rg_techdemo_2025_Q4/providers/Microsoft.DataFactory/factories/adf-techdemo-rca/pipelineruns/@{variables('RunId')}?api-version=2018-06-01",
+                            "method": "GET",
+                            "authentication": {
+                                "type": "ManagedServiceIdentity",
+                                "audience": "https://management.azure.com"
+                            }
+                        }
+                    },
+                    "Update_PipelineStatus": {
+                        "type": "SetVariable",
+                        "inputs": {
+                            "name": "PipelineStatus",
+                            "value": "@body('Get_Pipeline_Run_Status')?['status']"
+                        },
+                        "runAfter": {
+                            "Get_Pipeline_Run_Status": [
+                                "Succeeded"
+                            ]
+                        }
+                    },
+                    "Delay_30_Seconds": {
+                        "type": "Wait",
+                        "inputs": {
+                            "interval": {
+                                "count": 30,
+                                "unit": "Second"
+                            }
+                        },
+                        "runAfter": {
+                            "Update_PipelineStatus": [
+                                "Succeeded"
+                            ]
+                        }
+                    }
+                },
+                "runAfter": {
+                    "Set_RunId": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Check_Pipeline_Result": {
+                "type": "Switch",
+                "expression": "@variables('PipelineStatus')",
+                "default": {
+                    "actions": {
+                        "Callback_Cancelled": {
+                            "type": "Http",
+                            "inputs": {
+                                "uri": "@triggerBody()?['callback_url']",
+                                "method": "POST",
+                                "headers": {
+                                    "Content-Type": "application/json"
+                                },
+                                "body": {
+                                    "ticket_id": "@triggerBody()?['ticket_id']",
+                                    "status": "Cancelled",
+                                    "success": false,
+                                    "attempt_number": "@variables('AttemptNumber')",
+                                    "remediation_run_id": "@variables('RunId')",
+                                    "pipeline_name": "@triggerBody()?['pipeline_name']",
+                                    "original_run_id": "@triggerBody()?['original_run_id']",
+                                    "error_type": "@triggerBody()?['error_type']",
+                                    "error_message": "Pipeline run was cancelled or timed out",
+                                    "timestamp": "@utcNow()"
+                                }
+                            }
+                        }
+                    }
+                },
+                "cases": {
+                    "Success": {
+                        "actions": {
+                            "Callback_Success": {
+                                "type": "Http",
+                                "inputs": {
+                                    "uri": "@triggerBody()?['callback_url']",
+                                    "method": "POST",
+                                    "headers": {
+                                        "Content-Type": "application/json"
+                                    },
+                                    "body": {
+                                        "ticket_id": "@triggerBody()?['ticket_id']",
+                                        "status": "Succeeded",
+                                        "success": true,
+                                        "attempt_number": "@variables('AttemptNumber')",
+                                        "remediation_run_id": "@variables('RunId')",
+                                        "pipeline_name": "@triggerBody()?['pipeline_name']",
+                                        "original_run_id": "@triggerBody()?['original_run_id']",
+                                        "error_type": "@triggerBody()?['error_type']",
+                                        "timestamp": "@utcNow()"
+                                    }
+                                }
+                            }
+                        },
+                        "case": "Succeeded"
+                    },
+                    "Failed": {
+                        "actions": {
+                            "Callback_Failure": {
+                                "type": "Http",
+                                "inputs": {
+                                    "uri": "@triggerBody()?['callback_url']",
+                                    "method": "POST",
+                                    "headers": {
+                                        "Content-Type": "application/json"
+                                    },
+                                    "body": {
+                                        "ticket_id": "@triggerBody()?['ticket_id']",
+                                        "status": "Failed",
+                                        "success": false,
+                                        "attempt_number": "@variables('AttemptNumber')",
+                                        "remediation_run_id": "@variables('RunId')",
+                                        "pipeline_name": "@triggerBody()?['pipeline_name']",
+                                        "original_run_id": "@triggerBody()?['original_run_id']",
+                                        "error_type": "@triggerBody()?['error_type']",
+                                        "error_message": "Pipeline run failed after retry attempt @{variables('AttemptNumber')}",
+                                        "timestamp": "@utcNow()"
+                                    }
+                                }
+                            }
+                        },
+                        "case": "Failed"
+                    }
+                },
+                "runAfter": {
+                    "Monitor_Pipeline_Until_Complete": [
+                        "Succeeded"
+                    ]
+                }
+            }
+        },
+        "outputs": {},
+        "parameters": {
+            "$connections": {
+                "type": "Object",
+                "defaultValue": {}
+            }
+        }
+    },
+    "parameters": {
+        "$connections": {
+            "type": "Object",
+            "value": {
+                "azuredatafactory": {
+                    "id": "/subscriptions/d28a053b-ed09-40dd-92d6-43401a2c9799/providers/Microsoft.Web/locations/northcentralus/managedApis/azuredatafactory",
+                    "connectionId": "/subscriptions/d28a053b-ed09-40dd-92d6-43401a2c9799/resourceGroups/rg_techdemo_2025_Q4/providers/Microsoft.Web/connections/azuredatafactory",
+                    "connectionName": "azuredatafactory",
+                    "connectionProperties": {}
+                }
+            }
+        }
+    }
+}

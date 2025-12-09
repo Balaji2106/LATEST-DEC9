@@ -1,0 +1,64 @@
+# ===========================================
+# PYTHON / FASTAPI IGNORE RULES
+# ===========================================
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+.aiops-proj-env/
+aiops-proj-env/
+
+# Environment variables (contains secrets)
+.env
+*.env
+.env.*
+
+# ===========================================
+# PROJECT SPECIFIC IGNORE RULES
+# ===========================================
+
+# Local SQLite DB (never commit)
+data/
+*.db
+
+# Backup files
+backup/
+dashboard-backup.txt
+
+# Logs
+*.log
+logs/
+log/
+
+# Temporary or generated files
+*.tmp
+*.bak
+
+# Docker
+*.tar
+
+# ===========================================
+# IDE / OS FILES
+# ===========================================
+
+# VS Code
+.vscode/
+
+# JetBrains
+.idea/
+
+# Mac / Windows junk
+.DS_Store
+Thumbs.db
+
+# ===========================================
+# NODE (if frontend added later)
+# ===========================================
+
+node_modules/
+*.lock
