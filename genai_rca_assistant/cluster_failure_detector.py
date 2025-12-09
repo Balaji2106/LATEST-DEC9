@@ -50,7 +50,8 @@ CLUSTER_ERROR_CATEGORIES = {
         "typical_cause": "Spot/preemptible instance reclaimed by cloud provider",
         "remediation_hint": "Use on-demand instances or retry with spot instances",
         "keywords": ["spot.*instance.*terminated", "preempt", "cloud.*provider.*shutdown",
-                     "CLOUD_PROVIDER_SHUTDOWN", "instance.*reclaim"],
+                     "CLOUD_PROVIDER_SHUTDOWN", "instance.*reclaim", "infrastructure.*issue",
+                     "cloud.*infrastructure"],
     },
 
     "CLOUD_PROVIDER_LAUNCH_FAILURE": {
@@ -60,7 +61,8 @@ CLUSTER_ERROR_CATEGORIES = {
         "typical_cause": "Cloud provider unable to provision requested resources",
         "remediation_hint": "Retry or use different instance type/region",
         "keywords": ["launch.*failure", "provisioning.*failed", "instance.*launch.*failed",
-                     "CLOUD_PROVIDER_LAUNCH_FAILURE", "capacity.*unavailable"],
+                     "CLOUD_PROVIDER_LAUNCH_FAILURE", "capacity.*unavailable",
+                     "failed.*to.*provision", "cloud.*provider.*failed"],
     },
 
     # Resource Exhaustion
@@ -91,7 +93,8 @@ CLUSTER_ERROR_CATEGORIES = {
         "typical_cause": "Cluster initialization script failed",
         "remediation_hint": "Check init script logs, fix script errors, or remove problematic init script",
         "keywords": ["init.*script.*fail", "initialization.*fail", "bootstrap.*fail",
-                     "INIT_SCRIPT_FAILURE", "cluster.*init.*fail"],
+                     "INIT_SCRIPT_FAILURE", "cluster.*init.*fail", "init.*script.*exit",
+                     "script.*exited.*with.*code"],
     },
 
     "LIBRARY_INSTALLATION_FAILURE": {
@@ -143,7 +146,8 @@ CLUSTER_ERROR_CATEGORIES = {
         "remediable": True,
         "typical_cause": "Cluster took too long to start (init scripts, large libraries)",
         "remediation_hint": "Optimize init scripts, use cluster pools, or increase timeout",
-        "keywords": ["cluster.*start.*timeout", "startup.*timeout", "cluster.*creation.*timeout"],
+        "keywords": ["cluster.*start.*timeout", "startup.*timeout", "cluster.*creation.*timeout",
+                     "cluster.*startup.*timed.*out", "timed.*out.*after.*minutes"],
     },
 
     "IDLE_TIMEOUT": {
