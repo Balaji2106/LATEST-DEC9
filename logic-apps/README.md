@@ -28,6 +28,32 @@ These Logic Apps implement the callback-based monitoring architecture for auto-r
 
 ---
 
+## Important: Request Schema Requirements
+
+### URI Format for Databricks Workflows
+
+When calling the Databricks retry Logic App, the `databricks_workspace_url` field must be provided **WITHOUT** the `https://` protocol prefix. The Logic App automatically prepends `https://` to construct the full URI.
+
+**Correct format:**
+```json
+{
+  "databricks_workspace_url": "adb-1234567890123456.7.azuredatabricks.net",
+  "callback_url": "https://your-rca-app.com/api/remediation-callback"
+}
+```
+
+**Incorrect format (will fail):**
+```json
+{
+  "databricks_workspace_url": "https://adb-1234567890123456.7.azuredatabricks.net",  // ❌ Don't include https://
+  "callback_url": "https://your-rca-app.com/api/remediation-callback"
+}
+```
+
+Note: The `callback_url` field should include the full URL with protocol.
+
+---
+
 ## Deployment Instructions
 
 ### 1. Azure Data Factory Logic App

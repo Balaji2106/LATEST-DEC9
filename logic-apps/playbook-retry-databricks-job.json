@@ -71,17 +71,17 @@
             "Submit_Databricks_Job_Run": {
                 "type": "Http",
                 "inputs": {
-                    "uri": "@{triggerBody()?['databricks_workspace_url']}/api/2.1/jobs/run-now",
+                    "uri": "@concat('https://', triggerBody()?['databricks_workspace_url'], '/api/2.1/jobs/run-now')",
                     "method": "POST",
                     "headers": {
                         "Content-Type": "application/json"
                     },
+                    "body": {
+                        "job_id": "@triggerBody()?['job_id']"
+                    },
                     "authentication": {
                         "type": "ManagedServiceIdentity",
                         "audience": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
-                    },
-                    "body": {
-                        "job_id": "@triggerBody()?['job_id']"
                     }
                 },
                 "runAfter": {
@@ -113,7 +113,7 @@
                     "Get_Job_Run_Status": {
                         "type": "Http",
                         "inputs": {
-                            "uri": "@{triggerBody()?['databricks_workspace_url']}/api/2.1/jobs/runs/get?run_id=@{variables('RunId')}",
+                            "uri": "@concat('https://', triggerBody()?['databricks_workspace_url'], '/api/2.1/jobs/runs/get?run_id=', variables('RunId'))",
                             "method": "GET",
                             "authentication": {
                                 "type": "ManagedServiceIdentity",
@@ -219,6 +219,17 @@
             }
         },
         "outputs": {},
-        "parameters": {}
+        "parameters": {
+            "$connections": {
+                "type": "Object",
+                "defaultValue": {}
+            }
+        }
+    },
+    "parameters": {
+        "$connections": {
+            "type": "Object",
+            "value": {}
+        }
     }
 }
