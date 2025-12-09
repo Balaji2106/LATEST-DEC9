@@ -1223,36 +1223,45 @@ async def get_azure_access_token():
 
 
 async def trigger_auto_remediation(ticket_id: str, pipeline_name: str, error_type: str,
-                                     original_run_id: str, attempt_number: int = 1):
+                                     original_run_id: str, attempt_number: int = 1,
+                                     remediation_action: str = None, remediation_risk: str = "Medium"):
     """
-    Triggers auto-remediation via Azure Logic App
+    Triggers auto-remediation via Azure Logic App (AI-driven)
+
+    Parameters:
+        - remediation_action: AI-determined action (retry_pipeline, restart_cluster, etc.)
+        - remediation_risk: AI-determined risk level (Low, Medium, High)
+
     Returns: dict with success status and remediation_run_id
     """
-    logger.info(f"[AUTO-REM] Triggering auto-remediation for {ticket_id}, error: {error_type}, attempt: {attempt_number}")
+    logger.info(f"[AUTO-REM] Triggering auto-remediation for {ticket_id}, error: {error_type}, action: {remediation_action}, risk: {remediation_risk}, attempt: {attempt_number}")
 
-    # Check if error is remediable
-    if error_type not in REMEDIABLE_ERRORS:
-        logger.info(f"[AUTO-REM] Error type {error_type} is not auto-remediable")
-        return {"success": False, "message": "Error type not remediable"}
+    # Use AI-provided remediation action or default to retry_pipeline
+    if not remediation_action:
+        remediation_action = "retry_pipeline"
+        logger.warning(f"[AUTO-REM] No remediation_action provided, defaulting to {remediation_action}")
 
-    remediation_config = REMEDIABLE_ERRORS[error_type]
+    # Get retry configuration based on AI-determined risk level
+    retry_config = DEFAULT_RETRY_SCHEDULES.get(remediation_risk, DEFAULT_RETRY_SCHEDULES["Medium"])
+    max_retries = retry_config["max_retries"]
+    backoff_seconds = retry_config["backoff_seconds"]
 
     # Check retry limits
-    if attempt_number > remediation_config["max_retries"]:
-        logger.warning(f"[AUTO-REM] Max retries ({remediation_config['max_retries']}) exceeded for {ticket_id}")
+    if attempt_number > max_retries:
+        logger.warning(f"[AUTO-REM] Max retries ({max_retries}) exceeded for {ticket_id}")
         return {"success": False, "message": "Max retries exceeded"}
 
-    # Get playbook URL
-    playbook_url = remediation_config["playbook_url"]
+    # Get playbook URL from action mapping
+    playbook_url = REMEDIATION_ACTION_PLAYBOOKS.get(remediation_action)
     if not playbook_url:
-        logger.error(f"[AUTO-REM] No playbook URL configured for {error_type}")
-        return {"success": False, "message": "Playbook URL not configured"}
+        logger.error(f"[AUTO-REM] No playbook URL configured for action: {remediation_action}")
+        return {"success": False, "message": f"Playbook URL not configured for action: {remediation_action}"}
 
     # Calculate backoff delay
     if attempt_number > 1:
         backoff_index = attempt_number - 2
-        if backoff_index < len(remediation_config["backoff_seconds"]):
-            delay = remediation_config["backoff_seconds"][backoff_index]
+        if backoff_index < len(backoff_seconds):
+            delay = backoff_seconds[backoff_index]
             logger.info(f"[AUTO-REM] Waiting {delay}s before retry attempt {attempt_number}")
             await asyncio.sleep(delay)
 
@@ -1265,8 +1274,9 @@ async def trigger_auto_remediation(ticket_id: str, pipeline_name: str, error_typ
         "error_type": error_type,
         "original_run_id": original_run_id,
         "retry_attempt": attempt_number,
-        "max_retries": remediation_config["max_retries"],
-        "remediation_action": remediation_config["action"],
+        "max_retries": max_retries,
+        "remediation_action": remediation_action,
+        "remediation_risk": remediation_risk,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "callback_url": callback_url  # Logic App will call this when complete
     }
@@ -1290,7 +1300,7 @@ async def trigger_auto_remediation(ticket_id: str, pipeline_name: str, error_typ
                      :status, :error_type, :remediation_action, :logic_app_response, :started_at)''',
                  {"ticket_id": ticket_id, "original_run_id": original_run_id, "remediation_run_id": pending_run_id,
                   "attempt_number": attempt_number, "status": "pending", "error_type": error_type,
-                  "remediation_action": remediation_config["action"], "logic_app_response": json.dumps({"status": "pending"}),
+                  "remediation_action": remediation_action, "logic_app_response": json.dumps({"status": "pending"}),
                   "started_at": datetime.now(timezone.utc).isoformat()})
         logger.info(f"[AUTO-REM] Pre-inserted placeholder remediation attempt: {pending_run_id}")
     except Exception as e:
@@ -1329,13 +1339,13 @@ async def trigger_auto_remediation(ticket_id: str, pipeline_name: str, error_typ
             log_audit(
                 ticket_id=ticket_id, action="auto_remediation_triggered", pipeline=pipeline_name,
                 run_id=remediation_run_id, user_name="AI_AUTO_HEAL", user_empid="AUTO_REM_001",
-                details=json.dumps({"attempt": attempt_number, "action": remediation_config["action"], "error_type": error_type})
+                details=json.dumps({"attempt": attempt_number, "action": remediation_action, "error_type": error_type, "risk": remediation_risk})
             )
 
             logger.info(f"[AUTO-REM] Successfully triggered for {ticket_id}, remediation_run_id: {remediation_run_id}")
 
             # Send Slack notification
-            await send_slack_remediation_started(ticket_id, pipeline_name, attempt_number, remediation_config["max_retries"])
+            await send_slack_remediation_started(ticket_id, pipeline_name, attempt_number, max_retries)
 
             # Broadcast to dashboard
             try:
@@ -1364,36 +1374,45 @@ async def trigger_auto_remediation(ticket_id: str, pipeline_name: str, error_typ
 
 async def trigger_databricks_remediation(ticket_id: str, job_name: str, job_id: str,
                                           cluster_id: str, run_id: str, error_type: str,
-                                          attempt_number: int = 1):
+                                          attempt_number: int = 1,
+                                          remediation_action: str = None, remediation_risk: str = "Medium"):
     """
-    Triggers Databricks auto-remediation via Azure Logic App
+    Triggers Databricks auto-remediation via Azure Logic App (AI-driven)
+
+    Parameters:
+        - remediation_action: AI-determined action (retry_job, restart_cluster, reinstall_libraries)
+        - remediation_risk: AI-determined risk level (Low, Medium, High)
+
     Returns: dict with success status and remediation_run_id
     """
-    logger.info(f"[AUTO-REM-DBX] Triggering Databricks remediation for {ticket_id}, error: {error_type}, attempt: {attempt_number}")
+    logger.info(f"[AUTO-REM-DBX] Triggering Databricks remediation for {ticket_id}, error: {error_type}, action: {remediation_action}, risk: {remediation_risk}, attempt: {attempt_number}")
 
-    # Check if error is remediable
-    if error_type not in REMEDIABLE_ERRORS:
-        logger.info(f"[AUTO-REM-DBX] Error type {error_type} is not auto-remediable")
-        return {"success": False, "message": "Error type not remediable"}
+    # Use AI-provided remediation action or default to retry_job
+    if not remediation_action:
+        remediation_action = "retry_job"
+        logger.warning(f"[AUTO-REM-DBX] No remediation_action provided, defaulting to {remediation_action}")
 
-    remediation_config = REMEDIABLE_ERRORS[error_type]
+    # Get retry configuration based on AI-determined risk level
+    retry_config = DEFAULT_RETRY_SCHEDULES.get(remediation_risk, DEFAULT_RETRY_SCHEDULES["Medium"])
+    max_retries = retry_config["max_retries"]
+    backoff_seconds = retry_config["backoff_seconds"]
 
     # Check retry limits
-    if attempt_number > remediation_config["max_retries"]:
-        logger.warning(f"[AUTO-REM-DBX] Max retries ({remediation_config['max_retries']}) exceeded for {ticket_id}")
+    if attempt_number > max_retries:
+        logger.warning(f"[AUTO-REM-DBX] Max retries ({max_retries}) exceeded for {ticket_id}")
         return {"success": False, "message": "Max retries exceeded"}
 
-    # Get playbook URL (Databricks Logic App)
-    playbook_url = remediation_config["playbook_url"]
+    # Get playbook URL from action mapping
+    playbook_url = REMEDIATION_ACTION_PLAYBOOKS.get(remediation_action)
     if not playbook_url:
-        logger.error(f"[AUTO-REM-DBX] No playbook URL configured for {error_type}")
-        return {"success": False, "message": "Playbook URL not configured"}
+        logger.error(f"[AUTO-REM-DBX] No playbook URL configured for action: {remediation_action}")
+        return {"success": False, "message": f"Playbook URL not configured for action: {remediation_action}"}
 
     # Calculate backoff delay
     if attempt_number > 1:
         backoff_index = attempt_number - 2
-        if backoff_index < len(remediation_config["backoff_seconds"]):
-            delay = remediation_config["backoff_seconds"][backoff_index]
+        if backoff_index < len(backoff_seconds):
+            delay = backoff_seconds[backoff_index]
             logger.info(f"[AUTO-REM-DBX] Waiting {delay}s before retry attempt {attempt_number}")
             await asyncio.sleep(delay)
 
@@ -1408,8 +1427,9 @@ async def trigger_databricks_remediation(ticket_id: str, job_name: str, job_id: 
         "error_type": error_type,
         "original_run_id": run_id,
         "retry_attempt": attempt_number,
-        "max_retries": remediation_config["max_retries"],
-        "remediation_action": remediation_config["action"],
+        "max_retries": max_retries,
+        "remediation_action": remediation_action,
+        "remediation_risk": remediation_risk,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "callback_url": callback_url  # Logic App will call this when complete
     }
@@ -1432,7 +1452,7 @@ async def trigger_databricks_remediation(ticket_id: str, job_name: str, job_id: 
                          :status, :error_type, :remediation_action, :logic_app_response, :started_at)''',
                      {"ticket_id": ticket_id, "original_run_id": run_id, "remediation_run_id": remediation_run_id,
                       "attempt_number": attempt_number, "status": "in_progress", "error_type": error_type,
-                      "remediation_action": remediation_config["action"], "logic_app_response": json.dumps(response_data),
+                      "remediation_action": remediation_action, "logic_app_response": json.dumps(response_data),
                       "started_at": datetime.now(timezone.utc).isoformat()})
 
             # Update ticket
@@ -1449,13 +1469,13 @@ async def trigger_databricks_remediation(ticket_id: str, job_name: str, job_id: 
             log_audit(
                 ticket_id=ticket_id, action="databricks_remediation_triggered", pipeline=job_name,
                 run_id=remediation_run_id, user_name="AI_AUTO_HEAL_DBX", user_empid="AUTO_REM_DBX_001",
-                details=json.dumps({"attempt": attempt_number, "action": remediation_config["action"], "error_type": error_type, "cluster_id": cluster_id})
+                details=json.dumps({"attempt": attempt_number, "action": remediation_action, "error_type": error_type, "cluster_id": cluster_id, "risk": remediation_risk})
             )
 
             logger.info(f"[AUTO-REM-DBX] Successfully triggered for {ticket_id}, remediation_run_id: {remediation_run_id}")
 
             # Send Slack notification
-            await send_slack_remediation_started(ticket_id, job_name, attempt_number, remediation_config["max_retries"])
+            await send_slack_remediation_started(ticket_id, job_name, attempt_number, max_retries)
 
             # Broadcast to dashboard
             try:
@@ -2556,8 +2576,9 @@ async def azure_monitor(request: Request):
         remediation_risk = rca.get("remediation_risk", "High")
         business_impact = rca.get("business_impact", "Medium")
 
-        if is_auto_remediable and error_type in REMEDIABLE_ERRORS:
-            logger.info(f"[POLICY-ENGINE] Eligible for auto-remediation: {error_type} for ticket {tid}")
+        # AI-DRIVEN POLICY ENGINE: Use AI decision instead of hardcoded error list
+        if is_auto_remediable:
+            logger.info(f"[POLICY-ENGINE] AI determined eligible for auto-remediation: {error_type} (action: {remediation_action}, risk: {remediation_risk}) for ticket {tid}")
 
             # POLICY ENGINE DECISION POINT
             if requires_approval:
@@ -2584,13 +2605,15 @@ async def azure_monitor(request: Request):
                 # Low risk - proceed with auto-remediation
                 logger.info(f"[POLICY-ENGINE] Auto-remediation approved automatically (Risk: {remediation_risk}, Impact: {business_impact})")
                 try:
-                    # Trigger auto-remediation in background
+                    # Trigger auto-remediation in background (AI-driven)
                     asyncio.create_task(trigger_auto_remediation(
                         ticket_id=tid,
                         pipeline_name=pipeline,
                         error_type=error_type,
                         original_run_id=runid or "N/A",
-                        attempt_number=1
+                        attempt_number=1,
+                        remediation_action=remediation_action,
+                        remediation_risk=remediation_risk
                     ))
                     log_audit(ticket_id=tid, action="auto_remediation_eligible", pipeline=pipeline, run_id=runid,
                              details=f"Auto-remediation triggered for error_type: {error_type}, action: {remediation_action}")
@@ -2599,13 +2622,9 @@ async def azure_monitor(request: Request):
                     log_audit(ticket_id=tid, action="auto_remediation_trigger_failed", pipeline=pipeline, run_id=runid,
                              details=f"Error: {str(e)}")
         elif not is_auto_remediable:
-            logger.info(f"[POLICY-ENGINE] Not auto-remediable, requires manual intervention: {error_type}")
+            logger.info(f"[POLICY-ENGINE] AI determined not auto-remediable, requires manual intervention: {error_type}")
             log_audit(ticket_id=tid, action="manual_intervention_required", pipeline=pipeline, run_id=runid,
-                     details=f"AI determined error is not auto-remediable. Action: {remediation_action}")
-        elif error_type not in REMEDIABLE_ERRORS:
-            logger.info(f"[AUTO-REM] Error type {error_type} not in REMEDIABLE_ERRORS list")
-            log_audit(ticket_id=tid, action="error_type_not_remediable", pipeline=pipeline, run_id=runid,
-                     details=f"Error type {error_type} not configured in playbooks")
+                     details=f"AI determined error is not auto-remediable. Action: {remediation_action}, Reason: {rca.get('root_cause', 'Unknown')}")
 
     logger.info(f"Successfully created ticket {tid} for ADF alert")
 
@@ -3274,8 +3293,9 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
         remediation_risk = rca.get("remediation_risk", "High")
         business_impact = rca.get("business_impact", "Medium")
 
-        if is_auto_remediable and error_type in REMEDIABLE_ERRORS:
-            logger.info(f"[POLICY-ENGINE] Databricks eligible for auto-remediation: {error_type} for ticket {tid}")
+        # AI-DRIVEN POLICY ENGINE: Use AI decision instead of hardcoded error list
+        if is_auto_remediable:
+            logger.info(f"[POLICY-ENGINE] AI determined Databricks eligible for auto-remediation: {error_type} (action: {remediation_action}, risk: {remediation_risk}) for ticket {tid}")
 
             # POLICY ENGINE DECISION POINT
             if requires_approval:
@@ -3309,7 +3329,7 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
                              details=f"job_id is required for Databricks remediation but was not available in webhook payload")
                 else:
                     try:
-                        # For Databricks, we need to call the databricks-specific remediation Logic App
+                        # For Databricks, we need to call the databricks-specific remediation Logic App (AI-driven)
                         # Update the trigger call to pass Databricks-specific fields
                         asyncio.create_task(trigger_databricks_remediation(
                             ticket_id=tid,
@@ -3318,7 +3338,9 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
                             cluster_id=cluster_id,
                             run_id=run_id or "N/A",
                             error_type=error_type,
-                            attempt_number=1
+                            attempt_number=1,
+                            remediation_action=remediation_action,
+                            remediation_risk=remediation_risk
                         ))
                         log_audit(ticket_id=tid, action="auto_remediation_eligible", pipeline=job_name, run_id=run_id or "N/A",
                                  details=f"Auto-remediation triggered for error_type: {error_type}, action: {remediation_action}, job_id: {job_id}")
@@ -3327,13 +3349,9 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
                         log_audit(ticket_id=tid, action="auto_remediation_trigger_failed", pipeline=job_name, run_id=run_id or "N/A",
                                  details=f"Error: {str(e)}")
         elif not is_auto_remediable:
-            logger.info(f"[POLICY-ENGINE] Databricks not auto-remediable, requires manual intervention: {error_type}")
+            logger.info(f"[POLICY-ENGINE] AI determined Databricks error not auto-remediable, requires manual intervention: {error_type}")
             log_audit(ticket_id=tid, action="manual_intervention_required", pipeline=job_name, run_id=run_id or "N/A",
-                     details=f"AI determined error is not auto-remediable. Action: {remediation_action}")
-        elif error_type not in REMEDIABLE_ERRORS:
-            logger.info(f"[AUTO-REM] Databricks error type {error_type} not in REMEDIABLE_ERRORS list")
-            log_audit(ticket_id=tid, action="error_type_not_remediable", pipeline=job_name, run_id=run_id or "N/A",
-                     details=f"Error type {error_type} not configured in playbooks")
+                     details=f"AI determined error is not auto-remediable. Action: {remediation_action}, Reason: {rca.get('root_cause', 'Unknown')}")
 
     return {"status": "ticket_created", "ticket_id": tid}
 
