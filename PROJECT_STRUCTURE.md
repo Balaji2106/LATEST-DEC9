@@ -112,6 +112,51 @@ LATEST-DEC9/
 │       ├── Timeout: 2 hours
 │       └── Callback: Task completion status
 │
+├── ✈️ airflow/ (Apache Airflow Integration - 1,555 lines total) ⭐ NEW
+│   ├── AIRFLOW_SETUP_GUIDE.md                             (596 lines)
+│   │   ├── Complete installation guide
+│   │   ├── RCA integration setup
+│   │   ├── Testing procedures
+│   │   ├── Production deployment
+│   │   └── Troubleshooting guide
+│   │
+│   ├── dags/ (3 DAG files - 753 lines total)
+│   │   ├── rca_callbacks.py                               (169 lines)
+│   │   │   ├── send_to_rca() - Core webhook function
+│   │   │   ├── on_failure_callback() - Airflow callback handler
+│   │   │   ├── Error context extraction
+│   │   │   └── Comprehensive failure reporting
+│   │   │
+│   │   ├── test_rca_integration_dag.py                    (339 lines)
+│   │   │   ├── 8 test error scenarios
+│   │   │   ├── Auto-remediable: connection, timeout, API, DB errors
+│   │   │   ├── Manual: data quality, schema errors
+│   │   │   └── Validates RCA integration end-to-end
+│   │   │
+│   │   └── example_production_dag.py                      (245 lines)
+│   │       ├── Production ETL pipeline example
+│   │       ├── Customer data processing workflow
+│   │       ├── RCA monitoring enabled
+│   │       └── Shows real-world integration pattern
+│   │
+│   ├── setup_airflow.sh                                   (140 lines)
+│   │   ├── Automated installation script
+│   │   ├── Installs Apache Airflow 2.8.0
+│   │   ├── Initializes database
+│   │   ├── Creates admin user (admin/admin)
+│   │   └── Links DAGs directory
+│   │
+│   ├── start_airflow.sh                                   (120 lines)
+│   │   ├── Starts webserver (port 8080)
+│   │   ├── Starts scheduler
+│   │   ├── Process management
+│   │   └── Status checking
+│   │
+│   └── stop_airflow.sh                                    (70 lines)
+│       ├── Gracefully stops all processes
+│       ├── Cleanup and verification
+│       └── Force kill if needed
+│
 ├── 🧪 test_cluster_detection_coverage.py                  (154 lines)
 │   ├── Tests: 27 cluster failure scenarios
 │   ├── Categories: Start failures, terminations, infrastructure, resources
@@ -127,25 +172,27 @@ LATEST-DEC9/
 
 ### Code Distribution
 ```
-Total Lines: 11,681
+Total Lines: 13,236
 
-Python Code:        6,771 lines (58%)
+Python Code:        7,524 lines (57%)
   - main.py:        3,874 lines
-  - Other modules:  2,897 lines
+  - Other modules:  3,650 lines
 
-Documentation:      3,018 lines (26%)
-Logic Apps (JSON):  1,858 lines (16%)
-Web UI (HTML):      1,127 lines (10%)
+Documentation:      3,614 lines (27%)
+Logic Apps (JSON):  1,858 lines (14%)
+Web UI (HTML):      1,127 lines (9%)
+Shell Scripts:      330 lines (2%)
 ```
 
 ### File Breakdown by Type
 | Type | Files | Lines |
 |------|-------|-------|
-| Python (.py) | 7 files | 6,771 lines |
-| Markdown (.md) | 7 files | 3,018 lines |
+| Python (.py) | 10 files | 7,524 lines |
+| Markdown (.md) | 8 files | 3,614 lines |
 | JSON (Logic Apps) | 6 files | 1,858 lines |
 | HTML (UI) | 3 files | 1,127 lines |
-| **Total** | **23 files** | **11,681 lines** |
+| Shell (.sh) | 3 files | 330 lines |
+| **Total** | **30 files** | **13,236 lines** |
 
 ---
 
@@ -349,9 +396,17 @@ DEFAULT_RETRY_SCHEDULES = {
 ### Documentation Ready:
 ✅ Architecture guide
 ✅ Deployment guide
-✅ Airflow integration guide
+✅ Airflow integration guide (COMPLETE - with setup scripts!)
 ✅ Azure Monitor setup guide
 ✅ Implementation summary
+
+### Airflow Setup Complete: ⭐ NEW
+✅ 3 DAG files with RCA integration
+✅ Automated installation script
+✅ Start/stop management scripts
+✅ Comprehensive 596-line setup guide
+✅ 8 test error scenarios
+✅ Production ETL example
 
 ---
 
@@ -364,11 +419,14 @@ DEFAULT_RETRY_SCHEDULES = {
 | **ADF Logic App** | `logic-apps/playbook-retry-adf-pipeline.json` | Retry ADF pipelines |
 | **Databricks Logic Apps** | `logic-apps/playbook-retry-databricks-job.json`<br/>`logic-apps/playbook-restart-databricks-cluster.json`<br/>`logic-apps/playbook-reinstall-databricks-libraries.json` | Retry job<br/>Restart cluster<br/>Reinstall libraries |
 | **Airflow Logic App** | `logic-apps/playbook-retry-airflow-task.json` | Retry Airflow tasks |
+| **Airflow Setup** ⭐ | `airflow/setup_airflow.sh`<br/>`airflow/start_airflow.sh`<br/>`airflow/stop_airflow.sh` | Install Airflow<br/>Start services<br/>Stop services |
+| **Airflow DAGs** ⭐ | `airflow/dags/rca_callbacks.py`<br/>`airflow/dags/test_rca_integration_dag.py`<br/>`airflow/dags/example_production_dag.py` | RCA integration<br/>Test scenarios<br/>Production example |
+| **Airflow Guide** ⭐ | `airflow/AIRFLOW_SETUP_GUIDE.md` | Complete setup guide |
 | **Architecture Doc** | `AI_DRIVEN_REMEDIATION_ARCHITECTURE.md` | AI-driven approach |
 | **Deployment Guide** | `COMPLETE_AUTO_REMEDIATION_DEPLOYMENT.md` | Production setup |
 
 ---
 
-**Total Project Size**: 11,681 lines across 23 files
-**Status**: Production-ready with AI-driven remediation
+**Total Project Size**: 13,236 lines across 30 files
+**Status**: Production-ready with AI-driven remediation + Complete Airflow integration
 **Last Updated**: 2025-12-09
