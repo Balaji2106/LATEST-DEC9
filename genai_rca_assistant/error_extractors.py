@@ -338,6 +338,85 @@ class AzureFunctionsExtractor:
 
         return function_name, invocation_id, error_message, metadata
 
+class AirflowExtractor:
+    """Extract error details from Airflow DAG/task failure webhooks"""
+
+    @staticmethod
+    def extract(payload: Dict) -> Tuple[str, str, str, Dict]:
+        """
+        Extract error details from Airflow webhook
+
+        Airflow sends these on task/DAG failure via on_failure_callback
+
+        Returns:
+            (dag_id, task_id, error_message, metadata)
+        """
+        # Airflow callback context format
+        dag_id = (
+            payload.get("dag_id") or
+            payload.get("dag", {}).get("dag_id") or
+            "Unknown DAG"
+        )
+
+        task_id = (
+            payload.get("task_id") or
+            payload.get("task_instance", {}).get("task_id") or
+            payload.get("task", {}).get("task_id") or
+            "Unknown Task"
+        )
+
+        # Execution date/run ID
+        execution_date = (
+            payload.get("execution_date") or
+            payload.get("logical_date") or
+            payload.get("task_instance", {}).get("execution_date")
+        )
+
+        run_id = (
+            payload.get("run_id") or
+            payload.get("dag_run", {}).get("run_id") or
+            str(execution_date) if execution_date else "Unknown"
+        )
+
+        # Error/exception details
+        exception = payload.get("exception") or payload.get("error")
+        error_message = ""
+
+        if isinstance(exception, str):
+            error_message = exception
+        elif isinstance(exception, dict):
+            error_message = exception.get("message") or exception.get("error") or str(exception)
+        elif exception:
+            error_message = str(exception)
+        else:
+            # Fallback to task instance state
+            task_instance = payload.get("task_instance", {})
+            error_message = (
+                task_instance.get("error_message") or
+                task_instance.get("state_message") or
+                f"Airflow task {task_id} failed"
+            )
+
+        # Build metadata
+        metadata = {
+            "dag_id": dag_id,
+            "task_id": task_id,
+            "run_id": run_id,
+            "execution_date": execution_date,
+            "try_number": payload.get("try_number") or payload.get("task_instance", {}).get("try_number"),
+            "max_tries": payload.get("max_tries") or payload.get("task_instance", {}).get("max_tries"),
+            "pool": payload.get("pool") or payload.get("task_instance", {}).get("pool"),
+            "queue": payload.get("queue") or payload.get("task_instance", {}).get("queue"),
+            "operator": payload.get("operator") or payload.get("task", {}).get("operator"),
+            "state": payload.get("state") or payload.get("task_instance", {}).get("state"),
+            "log_url": payload.get("log_url") or payload.get("task_instance", {}).get("log_url"),
+        }
+
+        logger.info(f"✓ Airflow Extractor: dag={dag_id}, task={task_id}, run={run_id}")
+
+        return dag_id, task_id, error_message, metadata
+
+
 class AzureSynapseExtractor:
     """Extract error details from Azure Synapse webhooks"""
 
@@ -383,6 +462,7 @@ class AzureSynapseExtractor:
 
         return pipeline_name, run_id, error_message, metadata
 
+
 # Factory function
 def get_extractor(source_type: str):
     """Get appropriate extractor for source type"""
@@ -394,5 +474,6 @@ def get_extractor(source_type: str):
         "functions": AzureFunctionsExtractor,
         "synapse": AzureSynapseExtractor,
         "azure_synapse": AzureSynapseExtractor,
+        "airflow": AirflowExtractor,
     }
     return extractors.get(source_type.lower())
