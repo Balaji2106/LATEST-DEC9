@@ -277,14 +277,280 @@ def get_run_page_url(run_data: Dict) -> Optional[str]:
         host = DATABRICKS_HOST.rstrip('/')
         return f"{host}/#job/{run_data.get('job_id')}/run/{run_id}"
     return None
+
+
+# ============================================================================
+# CLUSTER API FUNCTIONS (NEW - For Enhanced Cluster Failure RCA)
+# ============================================================================
+
+def fetch_cluster_details(cluster_id: str) -> Optional[Dict]:
+    """
+    Fetch detailed cluster information from Databricks Clusters API.
+
+    Args:
+        cluster_id: The Databricks cluster ID
+
+    Returns:
+        Dictionary containing cluster details or None if fetch fails
+
+    API Response structure:
+    {
+        "cluster_id": "0123-456789-abc123",
+        "cluster_name": "prod-cluster",
+        "spark_version": "11.3.x-scala2.12",
+        "node_type_id": "Standard_DS3_v2",
+        "driver_node_type_id": "Standard_DS3_v2",
+        "num_workers": 8,
+        "autoscale": {
+            "min_workers": 2,
+            "max_workers": 10
+        },
+        "state": "TERMINATED",
+        "state_message": "Driver failed to start",
+        "termination_reason": {
+            "code": "DRIVER_UNREACHABLE",
+            "type": "CLOUD_FAILURE",
+            "parameters": {...}
+        },
+        "spark_conf": {...},
+        "custom_tags": {...},
+        "init_scripts": [...],
+        "cluster_source": "JOB",
+        "enable_elastic_disk": true,
+        "disk_spec": {...}
+    }
+    """
+    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+        logger.error("Databricks API credentials NOT configured - cannot fetch cluster details")
+        return None
+
+    host = DATABRICKS_HOST.rstrip('/')
+    url = f"{host}/api/2.0/clusters/get"
+
+    headers = {
+        "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    params = {"cluster_id": cluster_id}
+
+    try:
+        logger.info(f"🔄 Fetching cluster details for cluster_id: {cluster_id}")
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            logger.info(f"✅ Successfully fetched cluster details for {cluster_id}")
+            logger.info(f"   Cluster: {data.get('cluster_name')}, State: {data.get('state')}")
+
+            # Log termination reason if present
+            termination_reason = data.get("termination_reason")
+            if termination_reason:
+                code = termination_reason.get("code")
+                term_type = termination_reason.get("type")
+                logger.info(f"   Termination: {code} ({term_type})")
+
+            return data
+        elif response.status_code == 404:
+            logger.warning(f"Cluster {cluster_id} not found (may have been deleted)")
+            return None
+        else:
+            logger.error(f"Failed to fetch cluster details. Status: {response.status_code}, Response: {response.text}")
+            return None
+
+    except Exception as e:
+        logger.error(f"Exception while fetching cluster details: {e}")
+        return None
+
+
+def fetch_cluster_events(cluster_id: str, limit: int = 50) -> Optional[list]:
+    """
+    Fetch recent cluster events from Databricks Clusters API.
+
+    Args:
+        cluster_id: The Databricks cluster ID
+        limit: Maximum number of events to fetch (default 50)
+
+    Returns:
+        List of cluster events or None if fetch fails
+
+    Event types include:
+    - CREATING, RUNNING, RESTARTING, TERMINATING, TERMINATED
+    - EDITED, PINNED, UNPINNED
+    - STARTING, RESIZING
+    - CREATING_FAILED, TERMINATING_FAILED
+
+    Example event:
+    {
+        "cluster_id": "0123-456789-abc123",
+        "timestamp": 1702123456789,
+        "type": "TERMINATING",
+        "details": {
+            "reason": {
+                "code": "DRIVER_UNREACHABLE",
+                "type": "CLOUD_FAILURE"
+            },
+            "user": "user@example.com"
+        }
+    }
+    """
+    if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+        logger.error("Databricks API credentials NOT configured - cannot fetch cluster events")
+        return None
+
+    host = DATABRICKS_HOST.rstrip('/')
+    url = f"{host}/api/2.0/clusters/events"
+
+    headers = {
+        "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    # Request body (POST request for events API)
+    body = {
+        "cluster_id": cluster_id,
+        "order": "DESC",  # Most recent first
+        "limit": limit
+    }
+
+    try:
+        logger.info(f"🔄 Fetching cluster events for cluster_id: {cluster_id} (limit={limit})")
+        response = requests.post(url, headers=headers, json=body, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            events = data.get("events", [])
+            logger.info(f"✅ Successfully fetched {len(events)} cluster events")
+
+            # Log summary of recent events
+            if events:
+                recent_event_types = [e.get("type") for e in events[:5]]
+                logger.info(f"   Recent events: {', '.join(recent_event_types)}")
+
+            return events
+        elif response.status_code == 404:
+            logger.warning(f"Cluster {cluster_id} not found for events query")
+            return None
+        else:
+            logger.error(f"Failed to fetch cluster events. Status: {response.status_code}, Response: {response.text}")
+            return None
+
+    except Exception as e:
+        logger.error(f"Exception while fetching cluster events: {e}")
+        return None
+
+
+def extract_cluster_error_context(cluster_details: Dict, cluster_events: Optional[list] = None) -> Dict:
+    """
+    Extract cluster error context from cluster details and events.
+
+    Args:
+        cluster_details: Cluster details from fetch_cluster_details()
+        cluster_events: Optional cluster events from fetch_cluster_events()
+
+    Returns:
+        Dictionary with cluster error context for RCA
+    """
+    context = {
+        "cluster_id": cluster_details.get("cluster_id"),
+        "cluster_name": cluster_details.get("cluster_name"),
+        "state": cluster_details.get("state"),
+        "state_message": cluster_details.get("state_message"),
+        "cluster_source": cluster_details.get("cluster_source"),  # JOB, UI, API
+    }
+
+    # Termination reason (most important for failures)
+    termination_reason = cluster_details.get("termination_reason")
+    if termination_reason:
+        context["termination_code"] = termination_reason.get("code")
+        context["termination_type"] = termination_reason.get("type")
+        context["termination_parameters"] = termination_reason.get("parameters", {})
+
+    # Cluster configuration
+    context["configuration"] = {
+        "spark_version": cluster_details.get("spark_version"),
+        "driver_node_type": cluster_details.get("driver_node_type_id"),
+        "worker_node_type": cluster_details.get("node_type_id"),
+        "num_workers": cluster_details.get("num_workers"),
+        "autoscale": cluster_details.get("autoscale"),
+        "enable_elastic_disk": cluster_details.get("enable_elastic_disk"),
+        "spot_instances": cluster_details.get("aws_attributes", {}).get("availability") == "SPOT_WITH_FALLBACK",
+    }
+
+    # Spark configuration
+    spark_conf = cluster_details.get("spark_conf", {})
+    if spark_conf:
+        context["spark_conf"] = {
+            "driver_memory": spark_conf.get("spark.driver.memory"),
+            "executor_memory": spark_conf.get("spark.executor.memory"),
+            "executor_cores": spark_conf.get("spark.executor.cores"),
+        }
+
+    # Init scripts (potential failure point)
+    init_scripts = cluster_details.get("init_scripts", [])
+    if init_scripts:
+        context["init_scripts_count"] = len(init_scripts)
+        context["has_init_scripts"] = True
+
+    # Cluster events summary
+    if cluster_events:
+        context["recent_events"] = []
+        for event in cluster_events[:10]:  # Last 10 events
+            event_summary = {
+                "type": event.get("type"),
+                "timestamp": event.get("timestamp"),
+            }
+
+            # Add failure details if present
+            details = event.get("details", {})
+            if "reason" in details:
+                event_summary["reason_code"] = details["reason"].get("code")
+                event_summary["reason_type"] = details["reason"].get("type")
+
+            context["recent_events"].append(event_summary)
+
+        # Count failure events
+        failure_events = [e for e in cluster_events if "FAIL" in e.get("type", "").upper() or "TERMINAT" in e.get("type", "").upper()]
+        context["failure_event_count"] = len(failure_events)
+
+    return context
+
+
+def get_cluster_ui_url(cluster_id: str) -> Optional[str]:
+    """
+    Generate the Databricks UI URL for cluster page.
+
+    Args:
+        cluster_id: The Databricks cluster ID
+
+    Returns:
+        URL to the cluster page in Databricks UI
+    """
+    if cluster_id and DATABRICKS_HOST:
+        host = DATABRICKS_HOST.rstrip('/')
+        return f"{host}/#/setting/clusters/{cluster_id}/configuration"
+    return None
+
+
 # Example usage and testing
 if __name__ == "__main__":
-    # Test with a sample run_id
-    import sys 
-    if len(sys.argv) > 1:
-        test_run_id = sys.argv[1]
-        print(f"Testing with run_id: {test_run_id}")
-        
+    import sys
+    import json
+
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  Test job run:     python databricks_api_utils.py run <run_id>")
+        print("  Test cluster:     python databricks_api_utils.py cluster <cluster_id>")
+        sys.exit(1)
+
+    test_type = sys.argv[1].lower()
+
+    if test_type == "run" and len(sys.argv) > 2:
+        # Test job run details
+        test_run_id = sys.argv[2]
+        print(f"Testing job run API with run_id: {test_run_id}")
+        print("=" * 80)
+
         result = fetch_databricks_run_details(test_run_id)
         if result:
             print("\n=== Run Details ===")
@@ -293,15 +559,73 @@ if __name__ == "__main__":
             print(f"Run Name: {result.get('run_name')}")
             print(f"State: {result.get('state', {}).get('life_cycle_state')}")
             print(f"Result: {result.get('state', {}).get('result_state')}")
-            
+
             error = extract_error_message(result)
             if error:
                 print(f"\n=== Error Message ===\n{error}")
-            
+
             run_url = get_run_page_url(result)
             if run_url:
                 print(f"\n=== Run URL ===\n{run_url}")
         else:
-            print("Failed to fetch run details")
+            print("❌ Failed to fetch run details")
+
+    elif test_type == "cluster" and len(sys.argv) > 2:
+        # Test cluster details and events
+        test_cluster_id = sys.argv[2]
+        print(f"Testing cluster APIs with cluster_id: {test_cluster_id}")
+        print("=" * 80)
+
+        # Fetch cluster details
+        cluster_details = fetch_cluster_details(test_cluster_id)
+        if cluster_details:
+            print("\n=== Cluster Details ===")
+            print(f"Cluster ID: {cluster_details.get('cluster_id')}")
+            print(f"Cluster Name: {cluster_details.get('cluster_name')}")
+            print(f"State: {cluster_details.get('state')}")
+            print(f"State Message: {cluster_details.get('state_message')}")
+            print(f"Spark Version: {cluster_details.get('spark_version')}")
+            print(f"Driver Node: {cluster_details.get('driver_node_type_id')}")
+            print(f"Worker Node: {cluster_details.get('node_type_id')}")
+            print(f"Num Workers: {cluster_details.get('num_workers')}")
+
+            termination = cluster_details.get('termination_reason')
+            if termination:
+                print(f"\n=== Termination Reason ===")
+                print(f"Code: {termination.get('code')}")
+                print(f"Type: {termination.get('type')}")
+                print(f"Parameters: {termination.get('parameters')}")
+
+            # Fetch cluster events
+            print("\n=== Fetching Cluster Events ===")
+            cluster_events = fetch_cluster_events(test_cluster_id, limit=20)
+            if cluster_events:
+                print(f"Found {len(cluster_events)} events")
+                print("\nRecent Events:")
+                for i, event in enumerate(cluster_events[:10], 1):
+                    event_type = event.get('type')
+                    timestamp = event.get('timestamp')
+                    print(f"  {i}. {event_type} (timestamp: {timestamp})")
+
+                    details = event.get('details', {})
+                    if 'reason' in details:
+                        reason = details['reason']
+                        print(f"     Reason: {reason.get('code')} ({reason.get('type')})")
+
+            # Extract error context
+            print("\n=== Cluster Error Context ===")
+            error_context = extract_cluster_error_context(cluster_details, cluster_events)
+            print(json.dumps(error_context, indent=2))
+
+            # Cluster UI URL
+            cluster_url = get_cluster_ui_url(test_cluster_id)
+            if cluster_url:
+                print(f"\n=== Cluster URL ===\n{cluster_url}")
+        else:
+            print("❌ Failed to fetch cluster details")
+
     else:
-        print("Usage: python databricks_api_utils.py <run_id>")
+        print("❌ Invalid arguments")
+        print("Usage:")
+        print("  Test job run:     python databricks_api_utils.py run <run_id>")
+        print("  Test cluster:     python databricks_api_utils.py cluster <cluster_id>")
