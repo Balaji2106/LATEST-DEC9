@@ -119,76 +119,286 @@ PLAYBOOK_REGISTRY: Dict[str, Optional[str]] = {
     "DatabricksPermissionDenied": os.getenv("PLAYBOOK_CHECK_PERMISSIONS"),
 }
 
-# --- REMEDIABLE ERRORS CONFIGURATION ---
+# --- COMPREHENSIVE REMEDIABLE ERRORS CONFIGURATION ---
+# All auto-remediable errors across ADF, Databricks, and Airflow
 REMEDIABLE_ERRORS: Dict[str, Dict] = {
-    # Transient/Network Errors - Retry Strategy
+    # ========================================================================
+    # AZURE DATA FACTORY (ADF) ERRORS
+    # ========================================================================
+
+    # Network/Connection Errors
+    "SqlFailedToConnect": {
+        "action": "retry_pipeline",
+        "max_retries": 3,
+        "backoff_seconds": [60, 120, 300],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE"),
+        "platform": "adf"
+    },
+    "NetworkTimeout": {
+        "action": "retry_pipeline",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE"),
+        "platform": "adf"
+    },
     "GatewayTimeout": {
         "action": "retry_pipeline",
         "max_retries": 3,
         "backoff_seconds": [30, 60, 120],
-        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE")
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE"),
+        "platform": "adf"
     },
     "HttpConnectionFailed": {
         "action": "retry_pipeline",
         "max_retries": 3,
         "backoff_seconds": [30, 60, 120],
-        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE")
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE"),
+        "platform": "adf"
     },
+    "ConnectionError": {
+        "action": "retry_pipeline",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE"),
+        "platform": "adf"
+    },
+
+    # Throttling/Rate Limiting
     "ThrottlingError": {
         "action": "retry_pipeline",
         "max_retries": 5,
         "backoff_seconds": [30, 60, 120, 300, 600],
-        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE")
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE"),
+        "platform": "adf"
+    },
+    "ServiceBusy": {
+        "action": "retry_pipeline",
+        "max_retries": 4,
+        "backoff_seconds": [60, 120, 300, 600],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE"),
+        "platform": "adf"
     },
 
-    # Databricks Cluster Errors
-    "DatabricksClusterStartFailure": {
-        "action": "restart_cluster",
-        "max_retries": 2,
-        "backoff_seconds": [60, 180],
-        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER")
-    },
-    "ClusterMemoryExhausted": {
-        "action": "restart_cluster",
-        "max_retries": 2,
-        "backoff_seconds": [60, 180],
-        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER")
-    },
-
-    # Databricks Library Errors
-    "DatabricksLibraryInstallationError": {
-        "action": "reinstall_libraries",
-        "max_retries": 2,
-        "backoff_seconds": [60, 180],
-        "playbook_url": os.getenv("PLAYBOOK_REINSTALL_LIBRARIES")
-    },
-    "LibraryInstallationFailed": {
-        "action": "reinstall_libraries",
-        "max_retries": 2,
-        "backoff_seconds": [60, 180],
-        "playbook_url": os.getenv("PLAYBOOK_REINSTALL_LIBRARIES")
-    },
-
-    # Databricks Job Errors
-    "DatabricksJobExecutionError": {
-        "action": "retry_job",
+    # Transient Errors
+    "TransientError": {
+        "action": "retry_pipeline",
         "max_retries": 3,
         "backoff_seconds": [30, 60, 120],
-        "playbook_url": os.getenv("PLAYBOOK_RETRY_JOB")
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE"),
+        "platform": "adf"
+    },
+    "TemporaryError": {
+        "action": "retry_pipeline",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE"),
+        "platform": "adf"
+    },
+
+    # Data Source Issues
+    "UserErrorSourceBlobNotExists": {
+        "action": "check_upstream",
+        "max_retries": 2,
+        "backoff_seconds": [300, 600],
+        "playbook_url": os.getenv("PLAYBOOK_RERUN_UPSTREAM"),
+        "platform": "adf"
+    },
+
+    # ========================================================================
+    # DATABRICKS ERRORS - CLUSTER FAILURES
+    # ========================================================================
+
+    # Driver/Infrastructure Failures
+    "DRIVER_UNREACHABLE": {
+        "action": "restart_cluster",
+        "max_retries": 3,
+        "backoff_seconds": [60, 180, 300],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER"),
+        "platform": "databricks"
     },
     "DatabricksDriverNotResponding": {
         "action": "retry_job",
         "max_retries": 3,
         "backoff_seconds": [30, 60, 120],
-        "playbook_url": os.getenv("PLAYBOOK_RETRY_JOB")
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_JOB"),
+        "platform": "databricks"
     },
 
-    # Conditional Remediation
-    "UserErrorSourceBlobNotExists": {
-        "action": "check_upstream",
+    # Cloud Provider Issues
+    "CLOUD_PROVIDER_SHUTDOWN": {
+        "action": "retry_job",
+        "max_retries": 3,
+        "backoff_seconds": [60, 120, 300],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_JOB"),
+        "platform": "databricks"
+    },
+    "CLOUD_PROVIDER_LAUNCH_FAILURE": {
+        "action": "restart_cluster",
+        "max_retries": 3,
+        "backoff_seconds": [120, 300, 600],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER"),
+        "platform": "databricks"
+    },
+
+    # Resource Exhaustion
+    "OUT_OF_MEMORY": {
+        "action": "restart_cluster",
         "max_retries": 2,
-        "backoff_seconds": [300, 600],  # Wait 5 min, then 10 min
-        "playbook_url": os.getenv("PLAYBOOK_RERUN_UPSTREAM")
+        "backoff_seconds": [120, 300],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER"),
+        "platform": "databricks"
+    },
+    "ClusterMemoryExhausted": {
+        "action": "restart_cluster",
+        "max_retries": 2,
+        "backoff_seconds": [60, 180],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER"),
+        "platform": "databricks"
+    },
+    "OUT_OF_DISK": {
+        "action": "restart_cluster",
+        "max_retries": 2,
+        "backoff_seconds": [120, 300],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER"),
+        "platform": "databricks"
+    },
+
+    # Configuration Issues
+    "INIT_SCRIPT_FAILURE": {
+        "action": "restart_cluster",
+        "max_retries": 2,
+        "backoff_seconds": [60, 180],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER"),
+        "platform": "databricks"
+    },
+    "LIBRARY_INSTALLATION_FAILURE": {
+        "action": "reinstall_libraries",
+        "max_retries": 3,
+        "backoff_seconds": [60, 120, 300],
+        "playbook_url": os.getenv("PLAYBOOK_REINSTALL_LIBRARIES"),
+        "platform": "databricks"
+    },
+    "DatabricksLibraryInstallationError": {
+        "action": "reinstall_libraries",
+        "max_retries": 2,
+        "backoff_seconds": [60, 180],
+        "playbook_url": os.getenv("PLAYBOOK_REINSTALL_LIBRARIES"),
+        "platform": "databricks"
+    },
+    "LibraryInstallationFailed": {
+        "action": "reinstall_libraries",
+        "max_retries": 2,
+        "backoff_seconds": [60, 180],
+        "playbook_url": os.getenv("PLAYBOOK_REINSTALL_LIBRARIES"),
+        "platform": "databricks"
+    },
+
+    # Network Issues
+    "NETWORK_FAILURE": {
+        "action": "retry_job",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_JOB"),
+        "platform": "databricks"
+    },
+
+    # Timeouts
+    "CLUSTER_START_TIMEOUT": {
+        "action": "restart_cluster",
+        "max_retries": 2,
+        "backoff_seconds": [180, 300],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER"),
+        "platform": "databricks"
+    },
+
+    # Generic Job Errors
+    "DatabricksJobExecutionError": {
+        "action": "retry_job",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_JOB"),
+        "platform": "databricks"
+    },
+    "DatabricksClusterStartFailure": {
+        "action": "restart_cluster",
+        "max_retries": 2,
+        "backoff_seconds": [60, 180],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER"),
+        "platform": "databricks"
+    },
+
+    # ========================================================================
+    # AIRFLOW ERRORS
+    # ========================================================================
+
+    # Connection Errors
+    "AirflowConnectionError": {
+        "action": "retry_task",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_AIRFLOW_TASK"),
+        "platform": "airflow"
+    },
+
+    # Timeout Errors
+    "AirflowTimeoutError": {
+        "action": "retry_task",
+        "max_retries": 2,
+        "backoff_seconds": [60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_AIRFLOW_TASK"),
+        "platform": "airflow"
+    },
+    "SensorTimeout": {
+        "action": "retry_task",
+        "max_retries": 2,
+        "backoff_seconds": [300, 600],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_AIRFLOW_TASK"),
+        "platform": "airflow"
+    },
+
+    # Resource Errors
+    "AirflowOutOfMemory": {
+        "action": "retry_task",
+        "max_retries": 2,
+        "backoff_seconds": [60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_AIRFLOW_TASK"),
+        "platform": "airflow"
+    },
+
+    # Data Errors
+    "FileNotFound": {
+        "action": "retry_task",
+        "max_retries": 2,
+        "backoff_seconds": [60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_AIRFLOW_TASK"),
+        "platform": "airflow"
+    },
+
+    # API Errors
+    "APIError": {
+        "action": "retry_task",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_AIRFLOW_TASK"),
+        "platform": "airflow"
+    },
+
+    # Database Errors
+    "DatabaseError": {
+        "action": "retry_task",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_AIRFLOW_TASK"),
+        "platform": "airflow"
+    },
+
+    # Databricks Errors from Airflow
+    "DatabricksSubmitRunError": {
+        "action": "retry_task",
+        "max_retries": 2,
+        "backoff_seconds": [60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_AIRFLOW_TASK"),
+        "platform": "airflow"
     },
 }
 

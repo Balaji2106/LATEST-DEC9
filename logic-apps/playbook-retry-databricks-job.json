@@ -1,0 +1,224 @@
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "triggers": {
+            "When_RCA_sends_databricks_job_retry_request": {
+                "type": "Request",
+                "kind": "Http",
+                "inputs": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "job_name": {
+                                "type": "string"
+                            },
+                            "job_id": {
+                                "type": ["integer", "null"]
+                            },
+                            "ticket_id": {
+                                "type": "string"
+                            },
+                            "error_type": {
+                                "type": "string"
+                            },
+                            "original_run_id": {
+                                "type": ["string", "integer"]
+                            },
+                            "retry_attempt": {
+                                "type": "integer"
+                            },
+                            "callback_url": {
+                                "type": "string"
+                            },
+                            "databricks_workspace_url": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "job_name",
+                            "ticket_id",
+                            "callback_url"
+                        ]
+                    }
+                }
+            }
+        },
+        "actions": {
+            "Initialize_Variables": {
+                "type": "InitializeVariable",
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "RunId",
+                            "type": "string",
+                            "value": ""
+                        },
+                        {
+                            "name": "RunStatus",
+                            "type": "string",
+                            "value": "PENDING"
+                        },
+                        {
+                            "name": "AttemptNumber",
+                            "type": "integer",
+                            "value": "@triggerBody()?['retry_attempt']"
+                        }
+                    ]
+                },
+                "runAfter": {}
+            },
+            "Submit_Databricks_Job_Run": {
+                "type": "Http",
+                "inputs": {
+                    "uri": "@{triggerBody()?['databricks_workspace_url']}/api/2.1/jobs/run-now",
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/json"
+                    },
+                    "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+                    },
+                    "body": {
+                        "job_id": "@triggerBody()?['job_id']"
+                    }
+                },
+                "runAfter": {
+                    "Initialize_Variables": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Set_RunId": {
+                "type": "SetVariable",
+                "inputs": {
+                    "name": "RunId",
+                    "value": "@{body('Submit_Databricks_Job_Run')?['run_id']}"
+                },
+                "runAfter": {
+                    "Submit_Databricks_Job_Run": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Monitor_Job_Until_Complete": {
+                "type": "Until",
+                "expression": "@or(or(or(equals(variables('RunStatus'), 'SUCCESS'), equals(variables('RunStatus'), 'FAILED')), equals(variables('RunStatus'), 'TERMINATED')), equals(variables('RunStatus'), 'INTERNAL_ERROR'))",
+                "limit": {
+                    "count": 120,
+                    "timeout": "PT2H"
+                },
+                "actions": {
+                    "Get_Job_Run_Status": {
+                        "type": "Http",
+                        "inputs": {
+                            "uri": "@{triggerBody()?['databricks_workspace_url']}/api/2.1/jobs/runs/get?run_id=@{variables('RunId')}",
+                            "method": "GET",
+                            "authentication": {
+                                "type": "ManagedServiceIdentity",
+                                "audience": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+                            }
+                        }
+                    },
+                    "Update_RunStatus": {
+                        "type": "SetVariable",
+                        "inputs": {
+                            "name": "RunStatus",
+                            "value": "@body('Get_Job_Run_Status')?['state']?['life_cycle_state']"
+                        },
+                        "runAfter": {
+                            "Get_Job_Run_Status": [
+                                "Succeeded"
+                            ]
+                        }
+                    },
+                    "Delay_30_Seconds": {
+                        "type": "Wait",
+                        "inputs": {
+                            "interval": {
+                                "count": 30,
+                                "unit": "Second"
+                            }
+                        },
+                        "runAfter": {
+                            "Update_RunStatus": [
+                                "Succeeded"
+                            ]
+                        }
+                    }
+                },
+                "runAfter": {
+                    "Set_RunId": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Check_Job_Result": {
+                "type": "Switch",
+                "expression": "@body('Get_Job_Run_Status')?['state']?['result_state']",
+                "default": {
+                    "actions": {
+                        "Callback_Failed": {
+                            "type": "Http",
+                            "inputs": {
+                                "uri": "@triggerBody()?['callback_url']",
+                                "method": "POST",
+                                "headers": {
+                                    "Content-Type": "application/json"
+                                },
+                                "body": {
+                                    "ticket_id": "@triggerBody()?['ticket_id']",
+                                    "status": "Failed",
+                                    "success": false,
+                                    "attempt_number": "@variables('AttemptNumber')",
+                                    "remediation_run_id": "@variables('RunId')",
+                                    "job_name": "@triggerBody()?['job_name']",
+                                    "original_run_id": "@triggerBody()?['original_run_id']",
+                                    "error_type": "@triggerBody()?['error_type']",
+                                    "error_message": "@{body('Get_Job_Run_Status')?['state']?['state_message']}",
+                                    "timestamp": "@utcNow()"
+                                }
+                            }
+                        }
+                    }
+                },
+                "cases": {
+                    "Success": {
+                        "actions": {
+                            "Callback_Success": {
+                                "type": "Http",
+                                "inputs": {
+                                    "uri": "@triggerBody()?['callback_url']",
+                                    "method": "POST",
+                                    "headers": {
+                                        "Content-Type": "application/json"
+                                    },
+                                    "body": {
+                                        "ticket_id": "@triggerBody()?['ticket_id']",
+                                        "status": "Succeeded",
+                                        "success": true,
+                                        "attempt_number": "@variables('AttemptNumber')",
+                                        "remediation_run_id": "@variables('RunId')",
+                                        "job_name": "@triggerBody()?['job_name']",
+                                        "original_run_id": "@triggerBody()?['original_run_id']",
+                                        "error_type": "@triggerBody()?['error_type']",
+                                        "timestamp": "@utcNow()"
+                                    }
+                                }
+                            }
+                        },
+                        "case": "SUCCESS"
+                    }
+                },
+                "runAfter": {
+                    "Monitor_Job_Until_Complete": [
+                        "Succeeded"
+                    ]
+                }
+            }
+        },
+        "outputs": {},
+        "parameters": {}
+    }
+}
