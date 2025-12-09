@@ -38,7 +38,8 @@
                         "required": [
                             "job_name",
                             "ticket_id",
-                            "callback_url"
+                            "callback_url",
+                            "databricks_workspace_url"
                         ]
                     }
                 }
