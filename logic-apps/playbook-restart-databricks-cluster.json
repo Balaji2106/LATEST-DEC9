@@ -1,0 +1,332 @@
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "triggers": {
+            "When_RCA_sends_cluster_restart_request": {
+                "type": "Request",
+                "kind": "Http",
+                "inputs": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "cluster_id": {
+                                "type": "string"
+                            },
+                            "job_name": {
+                                "type": "string"
+                            },
+                            "job_id": {
+                                "type": ["integer", "null"]
+                            },
+                            "ticket_id": {
+                                "type": "string"
+                            },
+                            "error_type": {
+                                "type": "string"
+                            },
+                            "original_run_id": {
+                                "type": ["string", "integer"]
+                            },
+                            "retry_attempt": {
+                                "type": "integer"
+                            },
+                            "callback_url": {
+                                "type": "string"
+                            },
+                            "databricks_workspace_url": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "cluster_id",
+                            "ticket_id",
+                            "callback_url"
+                        ]
+                    }
+                }
+            }
+        },
+        "actions": {
+            "Initialize_Variables": {
+                "type": "InitializeVariable",
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "ClusterState",
+                            "type": "string",
+                            "value": "PENDING"
+                        },
+                        {
+                            "name": "AttemptNumber",
+                            "type": "integer",
+                            "value": "@triggerBody()?['retry_attempt']"
+                        },
+                        {
+                            "name": "RunId",
+                            "type": "string",
+                            "value": ""
+                        }
+                    ]
+                },
+                "runAfter": {}
+            },
+            "Terminate_Cluster": {
+                "type": "Http",
+                "inputs": {
+                    "uri": "@{triggerBody()?['databricks_workspace_url']}/api/2.0/clusters/delete",
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/json"
+                    },
+                    "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+                    },
+                    "body": {
+                        "cluster_id": "@triggerBody()?['cluster_id']"
+                    }
+                },
+                "runAfter": {
+                    "Initialize_Variables": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Wait_For_Termination": {
+                "type": "Wait",
+                "inputs": {
+                    "interval": {
+                        "count": 60,
+                        "unit": "Second"
+                    }
+                },
+                "runAfter": {
+                    "Terminate_Cluster": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Start_Cluster": {
+                "type": "Http",
+                "inputs": {
+                    "uri": "@{triggerBody()?['databricks_workspace_url']}/api/2.0/clusters/start",
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/json"
+                    },
+                    "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+                    },
+                    "body": {
+                        "cluster_id": "@triggerBody()?['cluster_id']"
+                    }
+                },
+                "runAfter": {
+                    "Wait_For_Termination": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Monitor_Cluster_Start": {
+                "type": "Until",
+                "expression": "@or(equals(variables('ClusterState'), 'RUNNING'), equals(variables('ClusterState'), 'ERROR'))",
+                "limit": {
+                    "count": 60,
+                    "timeout": "PT30M"
+                },
+                "actions": {
+                    "Get_Cluster_Status": {
+                        "type": "Http",
+                        "inputs": {
+                            "uri": "@{triggerBody()?['databricks_workspace_url']}/api/2.0/clusters/get?cluster_id=@{triggerBody()?['cluster_id']}",
+                            "method": "GET",
+                            "authentication": {
+                                "type": "ManagedServiceIdentity",
+                                "audience": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+                            }
+                        }
+                    },
+                    "Update_ClusterState": {
+                        "type": "SetVariable",
+                        "inputs": {
+                            "name": "ClusterState",
+                            "value": "@body('Get_Cluster_Status')?['state']"
+                        },
+                        "runAfter": {
+                            "Get_Cluster_Status": [
+                                "Succeeded"
+                            ]
+                        }
+                    },
+                    "Delay_30_Seconds": {
+                        "type": "Wait",
+                        "inputs": {
+                            "interval": {
+                                "count": 30,
+                                "unit": "Second"
+                            }
+                        },
+                        "runAfter": {
+                            "Update_ClusterState": [
+                                "Succeeded"
+                            ]
+                        }
+                    }
+                },
+                "runAfter": {
+                    "Start_Cluster": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Check_If_Job_Should_Be_Retried": {
+                "type": "If",
+                "expression": {
+                    "and": [
+                        {
+                            "not": {
+                                "equals": [
+                                    "@triggerBody()?['job_id']",
+                                    null
+                                ]
+                            }
+                        },
+                        {
+                            "equals": [
+                                "@variables('ClusterState')",
+                                "RUNNING"
+                            ]
+                        }
+                    ]
+                },
+                "actions": {
+                    "Retry_Job_After_Cluster_Restart": {
+                        "type": "Http",
+                        "inputs": {
+                            "uri": "@{triggerBody()?['databricks_workspace_url']}/api/2.1/jobs/run-now",
+                            "method": "POST",
+                            "headers": {
+                                "Content-Type": "application/json"
+                            },
+                            "authentication": {
+                                "type": "ManagedServiceIdentity",
+                                "audience": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+                            },
+                            "body": {
+                                "job_id": "@triggerBody()?['job_id']"
+                            }
+                        }
+                    },
+                    "Set_New_RunId": {
+                        "type": "SetVariable",
+                        "inputs": {
+                            "name": "RunId",
+                            "value": "@{body('Retry_Job_After_Cluster_Restart')?['run_id']}"
+                        },
+                        "runAfter": {
+                            "Retry_Job_After_Cluster_Restart": [
+                                "Succeeded"
+                            ]
+                        }
+                    },
+                    "Callback_Job_Restarted": {
+                        "type": "Http",
+                        "inputs": {
+                            "uri": "@triggerBody()?['callback_url']",
+                            "method": "POST",
+                            "headers": {
+                                "Content-Type": "application/json"
+                            },
+                            "body": {
+                                "ticket_id": "@triggerBody()?['ticket_id']",
+                                "status": "JobRestarted",
+                                "success": true,
+                                "attempt_number": "@variables('AttemptNumber')",
+                                "remediation_run_id": "@variables('RunId')",
+                                "job_name": "@triggerBody()?['job_name']",
+                                "cluster_id": "@triggerBody()?['cluster_id']",
+                                "original_run_id": "@triggerBody()?['original_run_id']",
+                                "error_type": "@triggerBody()?['error_type']",
+                                "message": "Cluster restarted successfully and job submitted",
+                                "timestamp": "@utcNow()"
+                            }
+                        },
+                        "runAfter": {
+                            "Set_New_RunId": [
+                                "Succeeded"
+                            ]
+                        }
+                    }
+                },
+                "else": {
+                    "actions": {
+                        "Check_Cluster_Result": {
+                            "type": "Switch",
+                            "expression": "@variables('ClusterState')",
+                            "default": {
+                                "actions": {
+                                    "Callback_Cluster_Failed": {
+                                        "type": "Http",
+                                        "inputs": {
+                                            "uri": "@triggerBody()?['callback_url']",
+                                            "method": "POST",
+                                            "headers": {
+                                                "Content-Type": "application/json"
+                                            },
+                                            "body": {
+                                                "ticket_id": "@triggerBody()?['ticket_id']",
+                                                "status": "Failed",
+                                                "success": false,
+                                                "attempt_number": "@variables('AttemptNumber')",
+                                                "cluster_id": "@triggerBody()?['cluster_id']",
+                                                "error_type": "@triggerBody()?['error_type']",
+                                                "error_message": "Cluster failed to restart",
+                                                "timestamp": "@utcNow()"
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "cases": {
+                                "Running": {
+                                    "actions": {
+                                        "Callback_Cluster_Success": {
+                                            "type": "Http",
+                                            "inputs": {
+                                                "uri": "@triggerBody()?['callback_url']",
+                                                "method": "POST",
+                                                "headers": {
+                                                    "Content-Type": "application/json"
+                                                },
+                                                "body": {
+                                                    "ticket_id": "@triggerBody()?['ticket_id']",
+                                                    "status": "Succeeded",
+                                                    "success": true,
+                                                    "attempt_number": "@variables('AttemptNumber')",
+                                                    "cluster_id": "@triggerBody()?['cluster_id']",
+                                                    "error_type": "@triggerBody()?['error_type']",
+                                                    "message": "Cluster restarted successfully",
+                                                    "timestamp": "@utcNow()"
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "case": "RUNNING"
+                                }
+                            }
+                        }
+                    }
+                },
+                "runAfter": {
+                    "Monitor_Cluster_Start": [
+                        "Succeeded"
+                    ]
+                }
+            }
+        },
+        "outputs": {},
+        "parameters": {}
+    }
+}

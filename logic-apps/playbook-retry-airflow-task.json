@@ -1,0 +1,239 @@
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "triggers": {
+            "When_RCA_sends_airflow_retry_request": {
+                "type": "Request",
+                "kind": "Http",
+                "inputs": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "dag_id": {
+                                "type": "string"
+                            },
+                            "task_id": {
+                                "type": "string"
+                            },
+                            "execution_date": {
+                                "type": "string"
+                            },
+                            "ticket_id": {
+                                "type": "string"
+                            },
+                            "error_type": {
+                                "type": "string"
+                            },
+                            "retry_attempt": {
+                                "type": "integer"
+                            },
+                            "callback_url": {
+                                "type": "string"
+                            },
+                            "airflow_base_url": {
+                                "type": "string"
+                            },
+                            "airflow_username": {
+                                "type": "string"
+                            },
+                            "airflow_password": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "dag_id",
+                            "task_id",
+                            "execution_date",
+                            "ticket_id",
+                            "callback_url",
+                            "airflow_base_url"
+                        ]
+                    }
+                }
+            }
+        },
+        "actions": {
+            "Initialize_Variables": {
+                "type": "InitializeVariable",
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "TaskState",
+                            "type": "string",
+                            "value": "queued"
+                        },
+                        {
+                            "name": "AttemptNumber",
+                            "type": "integer",
+                            "value": "@triggerBody()?['retry_attempt']"
+                        },
+                        {
+                            "name": "AuthHeader",
+                            "type": "string",
+                            "value": "@{concat('Basic ', base64(concat(triggerBody()?['airflow_username'], ':', triggerBody()?['airflow_password'])))}"
+                        }
+                    ]
+                },
+                "runAfter": {}
+            },
+            "Clear_Task_Instance": {
+                "type": "Http",
+                "inputs": {
+                    "uri": "@{triggerBody()?['airflow_base_url']}/api/v1/dags/@{triggerBody()?['dag_id']}/clearTaskInstances",
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/json",
+                        "Authorization": "@variables('AuthHeader')"
+                    },
+                    "body": {
+                        "dry_run": false,
+                        "task_ids": [
+                            "@{triggerBody()?['task_id']}"
+                        ],
+                        "execution_date": "@{triggerBody()?['execution_date']}",
+                        "reset_dag_runs": false,
+                        "only_failed": true,
+                        "only_running": false
+                    }
+                },
+                "runAfter": {
+                    "Initialize_Variables": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Wait_For_Task_To_Queue": {
+                "type": "Wait",
+                "inputs": {
+                    "interval": {
+                        "count": 10,
+                        "unit": "Second"
+                    }
+                },
+                "runAfter": {
+                    "Clear_Task_Instance": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Monitor_Task_Until_Complete": {
+                "type": "Until",
+                "expression": "@or(or(equals(variables('TaskState'), 'success'), equals(variables('TaskState'), 'failed')), equals(variables('TaskState'), 'skipped'))",
+                "limit": {
+                    "count": 120,
+                    "timeout": "PT2H"
+                },
+                "actions": {
+                    "Get_Task_Instance_Status": {
+                        "type": "Http",
+                        "inputs": {
+                            "uri": "@{triggerBody()?['airflow_base_url']}/api/v1/dags/@{triggerBody()?['dag_id']}/dagRuns/@{encodeURIComponent(triggerBody()?['execution_date'])}/taskInstances/@{triggerBody()?['task_id']}",
+                            "method": "GET",
+                            "headers": {
+                                "Authorization": "@variables('AuthHeader')"
+                            }
+                        }
+                    },
+                    "Update_TaskState": {
+                        "type": "SetVariable",
+                        "inputs": {
+                            "name": "TaskState",
+                            "value": "@body('Get_Task_Instance_Status')?['state']"
+                        },
+                        "runAfter": {
+                            "Get_Task_Instance_Status": [
+                                "Succeeded"
+                            ]
+                        }
+                    },
+                    "Delay_30_Seconds": {
+                        "type": "Wait",
+                        "inputs": {
+                            "interval": {
+                                "count": 30,
+                                "unit": "Second"
+                            }
+                        },
+                        "runAfter": {
+                            "Update_TaskState": [
+                                "Succeeded"
+                            ]
+                        }
+                    }
+                },
+                "runAfter": {
+                    "Wait_For_Task_To_Queue": [
+                        "Succeeded"
+                    ]
+                }
+            },
+            "Check_Task_Result": {
+                "type": "Switch",
+                "expression": "@variables('TaskState')",
+                "default": {
+                    "actions": {
+                        "Callback_Failed": {
+                            "type": "Http",
+                            "inputs": {
+                                "uri": "@triggerBody()?['callback_url']",
+                                "method": "POST",
+                                "headers": {
+                                    "Content-Type": "application/json"
+                                },
+                                "body": {
+                                    "ticket_id": "@triggerBody()?['ticket_id']",
+                                    "status": "Failed",
+                                    "success": false,
+                                    "attempt_number": "@variables('AttemptNumber')",
+                                    "dag_id": "@triggerBody()?['dag_id']",
+                                    "task_id": "@triggerBody()?['task_id']",
+                                    "execution_date": "@triggerBody()?['execution_date']",
+                                    "error_type": "@triggerBody()?['error_type']",
+                                    "error_message": "Airflow task failed after retry attempt @{variables('AttemptNumber')}",
+                                    "timestamp": "@utcNow()"
+                                }
+                            }
+                        }
+                    }
+                },
+                "cases": {
+                    "Success": {
+                        "actions": {
+                            "Callback_Success": {
+                                "type": "Http",
+                                "inputs": {
+                                    "uri": "@triggerBody()?['callback_url']",
+                                    "method": "POST",
+                                    "headers": {
+                                        "Content-Type": "application/json"
+                                    },
+                                    "body": {
+                                        "ticket_id": "@triggerBody()?['ticket_id']",
+                                        "status": "Succeeded",
+                                        "success": true,
+                                        "attempt_number": "@variables('AttemptNumber')",
+                                        "dag_id": "@triggerBody()?['dag_id']",
+                                        "task_id": "@triggerBody()?['task_id']",
+                                        "execution_date": "@triggerBody()?['execution_date']",
+                                        "error_type": "@triggerBody()?['error_type']",
+                                        "message": "Airflow task succeeded after retry",
+                                        "timestamp": "@utcNow()"
+                                    }
+                                }
+                            }
+                        },
+                        "case": "success"
+                    }
+                },
+                "runAfter": {
+                    "Monitor_Task_Until_Complete": [
+                        "Succeeded"
+                    ]
+                }
+            }
+        },
+        "outputs": {},
+        "parameters": {}
+    }
+}
