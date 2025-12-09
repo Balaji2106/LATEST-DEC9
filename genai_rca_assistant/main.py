@@ -28,7 +28,22 @@ from sqlalchemy import create_engine, text
 from urllib.parse import quote_plus
 
 # Databricks API utilities
-from databricks_api_utils import fetch_databricks_run_details, extract_error_message
+from databricks_api_utils import (
+    fetch_databricks_run_details,
+    extract_error_message,
+    fetch_cluster_details,
+    fetch_cluster_events,
+    extract_cluster_error_context,
+    get_cluster_ui_url
+)
+
+# Cluster failure detection
+from cluster_failure_detector import (
+    is_cluster_related_error,
+    extract_cluster_context_from_error,
+    get_cluster_error_summary,
+    CLUSTER_ERROR_CATEGORIES
+)
 
 # Azure Blob Storage imports
 try:
@@ -3025,10 +3040,109 @@ async def process_databricks_failure(job_name, run_id, job_id, cluster_id, error
     # -----------------------
     finops_tags = extract_finops_tags(job_name, "databricks")
 
+    # ===================================================================================
+    # NEW: CLUSTER FAILURE DETECTION & ENRICHMENT
+    # ===================================================================================
+    cluster_failure_detected = False
+    cluster_context = None
+    cluster_analysis = None
+    enriched_error_message = error_message
+
+    # Detect if this is a cluster-related failure
+    logger.info("=" * 80)
+    logger.info("🔍 ANALYZING ERROR FOR CLUSTER FAILURE PATTERNS")
+    logger.info("=" * 80)
+
+    cluster_analysis = is_cluster_related_error(error_message, run_details)
+
+    if cluster_analysis.is_cluster_failure:
+        cluster_failure_detected = True
+        logger.info(f"✅ CLUSTER FAILURE DETECTED!")
+        logger.info(f"   Category: {cluster_analysis.error_category}")
+        logger.info(f"   Termination Code: {cluster_analysis.termination_code}")
+        logger.info(f"   Severity: {cluster_analysis.severity}")
+        logger.info(f"   Remediable: {cluster_analysis.is_remediable}")
+        logger.info(f"   Confidence: {cluster_analysis.confidence * 100:.0f}%")
+
+        # If cluster_id is available, fetch detailed cluster information
+        if cluster_id:
+            logger.info(f"📡 Fetching cluster details for cluster_id: {cluster_id}")
+
+            try:
+                # Fetch cluster details
+                cluster_details = fetch_cluster_details(cluster_id)
+
+                if cluster_details:
+                    logger.info(f"✅ Cluster details fetched successfully")
+
+                    # Fetch cluster events
+                    logger.info(f"📡 Fetching cluster events...")
+                    cluster_events = fetch_cluster_events(cluster_id, limit=30)
+
+                    if cluster_events:
+                        logger.info(f"✅ Fetched {len(cluster_events)} cluster events")
+
+                    # Extract enriched cluster context
+                    cluster_context = extract_cluster_error_context(cluster_details, cluster_events)
+
+                    # Add cluster analysis to context
+                    cluster_context["failure_analysis"] = {
+                        "error_category": cluster_analysis.error_category,
+                        "termination_code": cluster_analysis.termination_code,
+                        "typical_cause": cluster_analysis.typical_cause,
+                        "remediation_hint": cluster_analysis.remediation_hint,
+                        "detection_confidence": cluster_analysis.confidence
+                    }
+
+                    # Build enriched error message with cluster context
+                    enriched_error_message = f"""
+🔴 CLUSTER FAILURE DETECTED
+
+Original Error:
+{error_message}
+
+Cluster Analysis:
+- Error Category: {cluster_analysis.error_category}
+- Termination Code: {cluster_analysis.termination_code or 'N/A'}
+- Typical Cause: {cluster_analysis.typical_cause}
+
+Cluster Configuration:
+- Cluster Name: {cluster_context.get('cluster_name')}
+- Cluster ID: {cluster_context.get('cluster_id')}
+- State: {cluster_context.get('state')}
+- Driver Node: {cluster_context.get('configuration', {}).get('driver_node_type')}
+- Worker Node: {cluster_context.get('configuration', {}).get('worker_node_type')}
+- Num Workers: {cluster_context.get('configuration', {}).get('num_workers')}
+- Spark Version: {cluster_context.get('configuration', {}).get('spark_version')}
+- Spot Instances: {cluster_context.get('configuration', {}).get('spot_instances', False)}
+
+Recent Cluster Events:
+{chr(10).join([f"  - {e.get('type')} at {e.get('timestamp')}" for e in cluster_context.get('recent_events', [])[:5]])}
+
+Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
+"""
+
+                    logger.info("=" * 80)
+                    logger.info("📊 ENRICHED ERROR CONTEXT FOR RCA:")
+                    logger.info(enriched_error_message[:500] + "...")
+                    logger.info("=" * 80)
+
+                else:
+                    logger.warning(f"⚠️ Could not fetch cluster details for {cluster_id}")
+
+            except Exception as e:
+                logger.error(f"❌ Error fetching cluster information: {e}")
+        else:
+            logger.warning(f"⚠️ Cluster failure detected but no cluster_id available for detailed analysis")
+
+    else:
+        logger.info(f"ℹ️ NOT a cluster failure - likely application/data error")
+        logger.info(f"   Detection confidence: {cluster_analysis.confidence * 100:.0f}%")
+
     # -----------------------
-    # RCA GENERATION
+    # RCA GENERATION (with enriched context if cluster failure)
     # -----------------------
-    rca = generate_rca_and_recs(error_message, source_type="databricks")
+    rca = generate_rca_and_recs(enriched_error_message, source_type="databricks")
     severity = rca.get("severity", "Medium")
     priority = derive_priority(severity)
     sla_seconds = sla_for_priority(priority)
@@ -3054,6 +3168,31 @@ async def process_databricks_failure(job_name, run_id, job_id, cluster_id, error
     affected_entity["job_id"] = job_id
     affected_entity["cluster_id"] = cluster_id
     affected_entity["job_name"] = job_name
+
+    # Add cluster failure metadata if detected
+    if cluster_failure_detected and cluster_analysis:
+        affected_entity["cluster_failure"] = {
+            "detected": True,
+            "error_category": cluster_analysis.error_category,
+            "termination_code": cluster_analysis.termination_code,
+            "severity": cluster_analysis.severity,
+            "is_remediable": cluster_analysis.is_remediable,
+            "typical_cause": cluster_analysis.typical_cause,
+            "remediation_hint": cluster_analysis.remediation_hint,
+            "detection_confidence": cluster_analysis.confidence
+        }
+
+        # Add cluster configuration summary if available
+        if cluster_context:
+            affected_entity["cluster_config"] = {
+                "cluster_name": cluster_context.get("cluster_name"),
+                "driver_node": cluster_context.get("configuration", {}).get("driver_node_type"),
+                "worker_node": cluster_context.get("configuration", {}).get("worker_node_type"),
+                "num_workers": cluster_context.get("configuration", {}).get("num_workers"),
+                "spark_version": cluster_context.get("configuration", {}).get("spark_version"),
+                "spot_instances": cluster_context.get("configuration", {}).get("spot_instances", False),
+                "failure_event_count": cluster_context.get("failure_event_count", 0)
+            }
 
     # Convert back to JSON string for storage
     affected_entity = json.dumps(affected_entity)
