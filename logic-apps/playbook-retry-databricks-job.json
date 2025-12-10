@@ -10,11 +10,8 @@
                     "schema": {
                         "type": "object",
                         "properties": {
-                            "job_name": {
+                            "pipeline_name": {
                                 "type": "string"
-                            },
-                            "job_id": {
-                                "type": ["integer", "null"]
                             },
                             "ticket_id": {
                                 "type": "string"
@@ -28,15 +25,26 @@
                             "retry_attempt": {
                                 "type": "integer"
                             },
+                            "max_retries": {
+                                "type": "integer"
+                            },
+                            "remediation_action": {
+                                "type": "string"
+                            },
+                            "remediation_risk": {
+                                "type": "string"
+                            },
+                            "timestamp": {
+                                "type": "string"
+                            },
                             "callback_url": {
                                 "type": "string"
                             },
-                            "databricks_workspace_url": {
-                                "type": "string"
+                            "job_id": {
+                                "type": ["integer", "null"]
                             }
                         },
                         "required": [
-                            "job_name",
                             "ticket_id",
                             "callback_url"
                         ]
@@ -71,17 +79,14 @@
             "Submit_Databricks_Job_Run": {
                 "type": "Http",
                 "inputs": {
-                    "uri": "@concat('https://', triggerBody()?['databricks_workspace_url'], '/api/2.1/jobs/run-now')",
+                    "uri": "@concat(parameters('databricks_workspace_url'), '/api/2.1/jobs/run-now')",
                     "method": "POST",
                     "headers": {
-                        "Content-Type": "application/json"
+                        "Content-Type": "application/json",
+                        "Authorization": "@concat('Bearer ', parameters('databricks_token'))"
                     },
                     "body": {
                         "job_id": "@triggerBody()?['job_id']"
-                    },
-                    "authentication": {
-                        "type": "ManagedServiceIdentity",
-                        "audience": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
                     }
                 },
                 "runAfter": {
@@ -113,11 +118,10 @@
                     "Get_Job_Run_Status": {
                         "type": "Http",
                         "inputs": {
-                            "uri": "@concat('https://', triggerBody()?['databricks_workspace_url'], '/api/2.1/jobs/runs/get?run_id=', variables('RunId'))",
+                            "uri": "@concat(parameters('databricks_workspace_url'), '/api/2.1/jobs/runs/get?run_id=', variables('RunId'))",
                             "method": "GET",
-                            "authentication": {
-                                "type": "ManagedServiceIdentity",
-                                "audience": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
+                            "headers": {
+                                "Authorization": "@concat('Bearer ', parameters('databricks_token'))"
                             }
                         }
                     },
@@ -173,7 +177,7 @@
                                     "success": false,
                                     "attempt_number": "@variables('AttemptNumber')",
                                     "remediation_run_id": "@variables('RunId')",
-                                    "job_name": "@triggerBody()?['job_name']",
+                                    "pipeline_name": "@triggerBody()?['pipeline_name']",
                                     "original_run_id": "@triggerBody()?['original_run_id']",
                                     "error_type": "@triggerBody()?['error_type']",
                                     "error_message": "@{body('Get_Job_Run_Status')?['state']?['state_message']}",
@@ -200,7 +204,7 @@
                                         "success": true,
                                         "attempt_number": "@variables('AttemptNumber')",
                                         "remediation_run_id": "@variables('RunId')",
-                                        "job_name": "@triggerBody()?['job_name']",
+                                        "pipeline_name": "@triggerBody()?['pipeline_name']",
                                         "original_run_id": "@triggerBody()?['original_run_id']",
                                         "error_type": "@triggerBody()?['error_type']",
                                         "timestamp": "@utcNow()"
@@ -220,6 +224,14 @@
         },
         "outputs": {},
         "parameters": {
+            "databricks_workspace_url": {
+                "defaultValue": "https://adb-4063542298037379.19.azuredatabricks.net",
+                "type": "String"
+            },
+            "databricks_token": {
+                "defaultValue": "",
+                "type": "SecureString"
+            },
             "$connections": {
                 "type": "Object",
                 "defaultValue": {}
@@ -227,8 +239,13 @@
         }
     },
     "parameters": {
+        "databricks_workspace_url": {
+            "value": "https://adb-4063542298037379.19.azuredatabricks.net"
+        },
+        "databricks_token": {
+            "value": ""
+        },
         "$connections": {
-            "type": "Object",
             "value": {}
         }
     }

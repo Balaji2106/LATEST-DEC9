@@ -38,6 +38,7 @@ When calling the Databricks retry Logic App, the `databricks_workspace_url` fiel
 ```json
 {
   "databricks_workspace_url": "adb-1234567890123456.7.azuredatabricks.net",
+  "databricks_token": "dapi1234567890abcdef",
   "callback_url": "https://your-rca-app.com/api/remediation-callback"
 }
 ```
@@ -46,9 +47,15 @@ When calling the Databricks retry Logic App, the `databricks_workspace_url` fiel
 ```json
 {
   "databricks_workspace_url": "https://adb-1234567890123456.7.azuredatabricks.net",  // ❌ Don't include https://
+  "databricks_token": "dapi1234567890abcdef",
   "callback_url": "https://your-rca-app.com/api/remediation-callback"
 }
 ```
+
+**Authentication:**
+- Uses **Bearer Token** authentication with Databricks Personal Access Token (PAT)
+- The token must be passed in each request to the Logic App
+- For security, consider storing the token in Azure Key Vault and having the RCA app fetch it
 
 Note: The `callback_url` field should include the full URL with protocol.
 
@@ -120,7 +127,7 @@ Note: The `callback_url` field should include the full URL with protocol.
 
 ### 2. Databricks Logic App
 
-**File**: `databricks-auto-remediation-with-callback.json`
+**File**: `playbook-retry-databricks-job.json`
 
 #### Prerequisites
 - Databricks workspace
@@ -128,51 +135,52 @@ Note: The `callback_url` field should include the full URL with protocol.
 
 #### Steps
 
-1. **Create Logic App in Azure Portal**
-   - Name: `databricks-auto-remediation`
+1. **Create Databricks Personal Access Token**
+   - Go to Databricks Workspace → Settings → User Settings → Access Tokens
+   - Click "Generate New Token"
+   - Name: "Logic-App-RCA-Integration"
+   - Lifetime: Choose appropriate duration (90 days recommended)
+   - Copy and save the token securely
+
+2. **Create Logic App in Azure Portal**
+   - Name: `playbook-retry-databricks-job`
    - Resource Group: Same as your Databricks workspace
    - Region: Same as your Databricks workspace
 
-2. **Import Workflow**
+3. **Import Workflow**
    - Open Logic App → Logic App Designer → Code View
-   - Replace entire JSON with contents of `databricks-auto-remediation-with-callback.json`
-   - **IMPORTANT**: Replace placeholders:
-     - `<DATABRICKS_WORKSPACE>` → Your Databricks workspace URL (e.g., "adb-1234567890123456.7.azuredatabricks.net")
-     - `<DATABRICKS_TOKEN>` → Your Databricks PAT token
+   - Replace entire JSON with contents of `playbook-retry-databricks-job.json`
+   - Save the workflow
 
-3. **Secure the Token**
-   - Don't hardcode token in JSON!
-   - Use Azure Key Vault:
-     - Store token in Key Vault
-     - Grant Logic App managed identity access to Key Vault
-     - Update Logic App to fetch token from Key Vault:
-       ```json
-       "@body('Get_Secret_From_KeyVault')?['value']"
-       ```
+4. **Secure the Token** (Recommended)
+   - Store token in Azure Key Vault or environment variables in RCA app
+   - **Never hardcode tokens in application code**
+   - RCA app should pass the token dynamically in each request
 
-4. **Get Logic App Trigger URL**
+5. **Get Logic App Trigger URL**
+   - After saving, go to Logic App → Overview
+   - Expand "When_RCA_sends_databricks_job_retry_request" trigger
    - Copy the HTTP POST URL
    - **Set environment variable in RCA app**:
      ```bash
      export DATABRICKS_LOGIC_APP_URL="<YOUR_LOGIC_APP_URL>"
+     export DATABRICKS_TOKEN="<YOUR_DATABRICKS_PAT>"
      ```
 
-5. **Test the Logic App**
+6. **Test the Logic App**
    ```bash
    curl -X POST "<YOUR_LOGIC_APP_URL>" \
      -H "Content-Type: application/json" \
      -d '{
        "job_name": "your-job-name",
-       "job_id": "123456",
-       "cluster_id": "your-cluster-id",
+       "job_id": 123456,
        "ticket_id": "test-456",
-       "callback_url": "http://your-rca-app.com/api/remediation-callback",
+       "databricks_workspace_url": "adb-1234567890123456.7.azuredatabricks.net",
+       "databricks_token": "dapi1234567890abcdef",
+       "callback_url": "https://your-rca-app.com/api/remediation-callback",
        "retry_attempt": 1,
-       "max_retries": 3,
        "error_type": "ClusterError",
-       "original_run_id": "test-run-id",
-       "remediation_action": "retry_job",
-       "timestamp": "2025-12-05T10:00:00Z"
+       "original_run_id": "test-run-id"
      }'
    ```
 
@@ -186,6 +194,10 @@ Add these to your RCA app's `.env` file:
 # Logic Apps endpoints
 LOGIC_APP_WEBHOOK_URL=https://prod-xx.region.logic.azure.com:443/workflows/.../triggers/manual/paths/invoke?...
 DATABRICKS_LOGIC_APP_URL=https://prod-yy.region.logic.azure.com:443/workflows/.../triggers/manual/paths/invoke?...
+
+# Databricks credentials
+DATABRICKS_WORKSPACE_URL=adb-1234567890123456.7.azuredatabricks.net
+DATABRICKS_TOKEN=dapi1234567890abcdef
 
 # Public URL for callbacks (must be accessible from Azure)
 PUBLIC_BASE_URL=https://your-rca-app.com
@@ -266,10 +278,15 @@ The RCA app will automatically use the new callback-based architecture.
 ## Security Best Practices
 
 1. **Use Managed Identity** for ADF connections (no credentials in Logic App)
-2. **Store Databricks token in Key Vault** (don't hardcode)
+2. **Store Databricks token securely**:
+   - Store in Azure Key Vault
+   - Never commit tokens to source control
+   - Rotate tokens regularly (recommended: every 90 days)
+   - Use environment variables in RCA app to pass token to Logic App
 3. **Enable authentication** on callback endpoint (optional - requires OAuth setup)
 4. **Restrict Logic App trigger URL** using IP whitelisting
 5. **Use HTTPS** for all endpoints (PUBLIC_BASE_URL must be https://)
+6. **Monitor token usage** in Databricks audit logs
 
 ---
 
