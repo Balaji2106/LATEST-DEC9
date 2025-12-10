@@ -17,32 +17,48 @@ Enterprise-grade AI-powered Root Cause Analysis (RCA) and Auto-Remediation platf
 
 ```
 .
-├── genai_rca_assistant/       # Main RCA application
-│   ├── main.py                # FastAPI application
-│   ├── dashboard.html         # Web dashboard UI
-│   ├── login.html / register.html
-│   ├── databricks_api_utils.py
-│   ├── cluster_failure_detector.py
-│   ├── airflow_integration.py
-│   ├── error_extractors.py
-│   └── requirements.txt
+├── genai_rca_assistant/           # Main RCA application
+│   ├── main.py                    # FastAPI application & API endpoints
+│   ├── dashboard.html             # Interactive dashboard UI
+│   ├── login.html                 # User authentication page
+│   ├── register.html              # User registration page
+│   ├── databricks_api_utils.py    # Databricks API integration
+│   ├── cluster_failure_detector.py # Cluster error detection logic
+│   ├── airflow_integration.py     # Airflow RCA integration
+│   ├── error_extractors.py        # Error pattern extractors
+│   ├── gemini_test.py             # Gemini API testing utility
+│   ├── requirements.txt           # Python dependencies
+│   └── data/                      # Runtime data (gitignored)
+│       └── tickets.db             # SQLite database for tickets
 │
-├── logic-apps/                # Azure Logic Apps workflows
+├── logic-apps/                    # Azure Logic Apps workflows
 │   ├── playbook-retry-databricks-job.json
 │   ├── playbook-retry-adf-pipeline.json
 │   ├── playbook-restart-databricks-cluster.json
-│   └── README.md
+│   ├── playbook-reinstall-databricks-libraries.json
+│   ├── playbook-retry-airflow-task.json
+│   └── README.md                  # Logic Apps deployment guide
 │
-├── airflow/                   # Apache Airflow setup
-│   ├── dags/                  # Airflow DAG definitions
-│   ├── setup_airflow.sh
-│   ├── start_airflow.sh
-│   ├── stop_airflow.sh
-│   └── AIRFLOW_SETUP_GUIDE.md
+├── airflow/                       # Apache Airflow setup
+│   ├── dags/                      # Airflow DAG definitions
+│   │   ├── example_production_dag.py
+│   │   ├── prod_etl_failure_test.py
+│   │   ├── rca_callbacks.py
+│   │   └── test_rca_integration_dag.py
+│   ├── setup_airflow.sh           # Airflow installation script
+│   ├── start_airflow.sh           # Start Airflow services
+│   ├── stop_airflow.sh            # Stop Airflow services
+│   ├── AIRFLOW_SETUP_GUIDE.md     # Airflow setup instructions
+│   └── airflow/                   # Airflow runtime (gitignored)
+│       ├── airflow.cfg
+│       ├── airflow.db
+│       ├── logs/
+│       └── webserver_config.py
 │
-├── docs/                      # Documentation
+├── docs/                          # Documentation
 │   ├── AI_DRIVEN_REMEDIATION_ARCHITECTURE.md
 │   ├── AUTO_REMEDIATION_IMPLEMENTATION.md
+│   ├── AUTO_REMEDIATION_SUMMARY.md
 │   ├── AZURE_MONITOR_CLUSTER_ALERTS_SETUP.md
 │   ├── AIRFLOW_INTEGRATION_SETUP.md
 │   ├── COMPLETE_AUTO_REMEDIATION_DEPLOYMENT.md
@@ -50,7 +66,10 @@ Enterprise-grade AI-powered Root Cause Analysis (RCA) and Auto-Remediation platf
 │   ├── PROJECT_STRUCTURE.md
 │   └── TESTING_AUTO_REMEDIATION.md
 │
-└── test_auto_remediation.py   # Auto-remediation tests
+├── test_auto_remediation.py       # Auto-remediation test suite
+├── test_cluster_detection_coverage.py  # Cluster detection tests
+├── .gitignore                     # Git ignore patterns
+└── README.md                      # This file
 ```
 
 ## 🛠️ Quick Start
