@@ -45,6 +45,15 @@ from cluster_failure_detector import (
     CLUSTER_ERROR_CATEGORIES
 )
 
+# Airflow integration
+from airflow_integration import (
+    classify_airflow_error,
+    build_airflow_context_for_rca,
+    AIRFLOW_REMEDIABLE_ERRORS
+)
+
+from error_extractors import AirflowExtractor
+
 # Azure Blob Storage imports
 try:
     from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
@@ -3392,6 +3401,201 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
                      details=f"AI determined error is not auto-remediable. Action: {remediation_action}, Reason: {rca.get('root_cause', 'Unknown')}")
 
     return {"status": "ticket_created", "ticket_id": tid}
+
+###########################################################################################################################
+
+@app.post("/airflow-monitor")
+async def airflow_monitor(request: Request):
+    """
+    Webhook endpoint for Airflow task/DAG failures.
+    Receives callbacks from Airflow's on_failure_callback.
+    """
+    # ------------------------------------------
+    # STEP 1: Parse raw payload
+    # ------------------------------------------
+    try:
+        body = await request.json()
+    except Exception as e:
+        logger.error(f"Invalid JSON body from Airflow webhook: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    logger.info("=" * 120)
+    logger.info("AIRFLOW MONITORING PAYLOAD RECEIVED 🌪️")
+    logger.info(json.dumps(body, indent=2))
+    logger.info("=" * 120)
+
+    # ------------------------------------------
+    # STEP 2: Extract error details using AirflowExtractor
+    # ------------------------------------------
+    try:
+        dag_id, task_id, error_message, metadata = AirflowExtractor.extract(body)
+    except Exception as e:
+        logger.error(f"Failed to extract Airflow error details: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse Airflow payload: {e}")
+
+    logger.info(f"📌 Airflow Failure: DAG={dag_id}, Task={task_id}")
+    logger.info(f"📌 Error: {error_message[:200]}...")
+
+    # ------------------------------------------
+    # STEP 3: Duplicate check (by DAG + Task + recent time)
+    # ------------------------------------------
+    run_id = metadata.get('run_id')
+
+    # Check if we already have a ticket for this run_id
+    if run_id:
+        existing = db_query(
+            "SELECT id, status FROM tickets WHERE run_id = :run_id AND processing_mode = 'airflow'",
+            {"run_id": run_id},
+            one=True
+        )
+        if existing:
+            logger.warning(f"❗ Duplicate Airflow run detected: run_id={run_id}")
+            return {
+                "status": "duplicate_ignored",
+                "ticket_id": existing["id"],
+                "message": f"Ticket already exists for run_id {run_id}"
+            }
+
+    # Additional duplicate check by DAG+Task+time
+    pipeline_name = f"{dag_id}/{task_id}"
+    recent_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    recent_ticket = db_query(
+        '''SELECT id, status, timestamp FROM tickets
+           WHERE pipeline = :pipeline_name
+           AND processing_mode = 'airflow'
+           AND timestamp > :cutoff
+           ORDER BY timestamp DESC
+           LIMIT 1''',
+        {"pipeline_name": pipeline_name, "cutoff": recent_cutoff},
+        one=True
+    )
+    if recent_ticket:
+        logger.warning(f"❗ Recent Airflow ticket found for {pipeline_name} within 5 minutes: {recent_ticket['id']}")
+        return {
+            "status": "duplicate_ignored",
+            "ticket_id": recent_ticket["id"],
+            "message": f"Recent ticket already exists for {pipeline_name}"
+        }
+
+    # ------------------------------------------
+    # STEP 4: Classify Airflow error
+    # ------------------------------------------
+    error_classification = classify_airflow_error(error_message)
+
+    if error_classification:
+        logger.info(f"✅ Classified as: {error_classification['error_type']} ({error_classification['category']})")
+        logger.info(f"   Remediable: {error_classification['is_remediable']}")
+        logger.info(f"   Action: {error_classification.get('action', 'N/A')}")
+    else:
+        logger.info("⚠️  Error not classified in AIRFLOW_REMEDIABLE_ERRORS")
+
+    # ------------------------------------------
+    # STEP 5: Build enriched context for RCA
+    # ------------------------------------------
+    enriched_context = build_airflow_context_for_rca(body, error_classification)
+
+    # ------------------------------------------
+    # STEP 6: Generate RCA using Gemini
+    # ------------------------------------------
+    logger.info("🧠 Generating RCA for Airflow failure...")
+    rca = generate_rca_and_recs(enriched_context, source_type="airflow")
+
+    # ------------------------------------------
+    # STEP 7: Create ticket
+    # ------------------------------------------
+    ticket_id = str(uuid.uuid4())
+    timestamp_iso = datetime.now(timezone.utc).isoformat()
+
+    # Extract finops tags (if any)
+    finops_tags = extract_finops_tags(dag_id, "airflow")
+
+    # Determine error type and severity
+    error_type = error_classification.get('error_type', 'Unknown') if error_classification else 'UnknownAirflowError'
+    severity = 'High' if error_classification and error_classification.get('is_remediable') else 'Medium'
+
+    # Prepare ticket data
+    ticket_data = {
+        "id": ticket_id,
+        "timestamp": timestamp_iso,
+        "pipeline": pipeline_name,
+        "run_id": run_id,
+        "rca_result": rca.get("rca", "Unable to generate RCA"),
+        "recommendations": json.dumps(rca.get("recommendations", [])),
+        "confidence": rca.get("confidence", 0.0),
+        "severity": severity,
+        "priority": "P2" if severity == "High" else "P3",
+        "error_type": error_type,
+        "affected_entity": dag_id,
+        "status": "Open",
+        "finops_team": finops_tags.get("finops_team"),
+        "finops_owner": finops_tags.get("finops_owner"),
+        "finops_cost_center": finops_tags.get("finops_cost_center"),
+        "processing_mode": "airflow"
+    }
+
+    db_insert("tickets", ticket_data)
+    logger.info(f"✅ Ticket created: {ticket_id}")
+
+    # Store Airflow metadata in tickets_metadata
+    airflow_metadata = {
+        "ticket_id": ticket_id,
+        "dag_id": dag_id,
+        "task_id": task_id,
+        "execution_date": metadata.get('execution_date'),
+        "try_number": metadata.get('try_number'),
+        "max_tries": metadata.get('max_tries'),
+        "operator": metadata.get('operator'),
+        "log_url": metadata.get('log_url'),
+        "airflow_base_url": metadata.get('airflow_base_url'),
+        "error_classification": json.dumps(error_classification) if error_classification else None,
+        "webhook_payload": json.dumps(body)
+    }
+
+    try:
+        db_insert("tickets_metadata", airflow_metadata)
+        logger.info(f"✅ Airflow metadata stored for ticket {ticket_id}")
+    except Exception as e:
+        logger.warning(f"Failed to store Airflow metadata: {e}")
+
+    # ------------------------------------------
+    # STEP 8: Send Slack notification
+    # ------------------------------------------
+    if SLACK_BOT_TOKEN:
+        try:
+            await send_slack_alert(
+                ticket_id=ticket_id,
+                pipeline=pipeline_name,
+                error_msg=error_message[:500],
+                rca_summary=rca.get("rca", "")[:300],
+                severity=severity,
+                run_id=run_id,
+                source="airflow"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send Slack alert: {e}")
+
+    # ------------------------------------------
+    # STEP 9: Log audit trail
+    # ------------------------------------------
+    log_audit(
+        ticket_id=ticket_id,
+        action="airflow_failure_received",
+        pipeline=pipeline_name,
+        run_id=run_id or "N/A",
+        details=f"Airflow DAG={dag_id}, Task={task_id}, Error={error_type}"
+    )
+
+    logger.info("=" * 120)
+    logger.info(f"✅ AIRFLOW TICKET PROCESSING COMPLETE: {ticket_id}")
+    logger.info("=" * 120)
+
+    return {
+        "status": "ticket_created",
+        "ticket_id": ticket_id,
+        "dag_id": dag_id,
+        "task_id": task_id,
+        "run_id": run_id
+    }
 
 ###########################################################################################################################
 
