@@ -62,3 +62,11 @@ Thumbs.db
 
 node_modules/
 *.lock
+
+# Airflow local configuration (user-specific)
+airflow/airflow/
+airflow/airflow.cfg
+airflow/airflow.db
+airflow/airflow-webserver.pid
+airflow/webserver_config.py
+airflow/logs/
