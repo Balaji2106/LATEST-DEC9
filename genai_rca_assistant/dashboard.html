@@ -24,12 +24,12 @@
   .card{background:#0f1720;border:1px solid #222426;border-radius:8px;padding:14px;margin:10px;width:320px;box-shadow:0 4px 18px rgba(0,0,0,0.6);transition:transform 0.2s;overflow:hidden}
   .card:hover{transform:translateY(-3px);box-shadow:0 6px 20px rgba(0,0,0,0.7)}
   .title{display:flex;justify-content:space-between;align-items:center}
-  .badge{padding:4px 8px;border-radius:6px;font-weight:600}
-  .sev-critical{background:#ff1744;color:#fff}
-  .sev-high{background:#ff5252;color:#fff}
-  .sev-medium{background:#ffc107;color:#000}
-  .sev-low{background:#00e676;color:#000}
-  .priority{margin-left:8px;background:#2196f3;color:#fff;padding:5px 10px;border-radius:6px;font-size:13px;font-weight:700}
+  .badge{padding:6px 10px;border-radius:6px;font-weight:700;font-size:13px;text-transform:uppercase}
+  .sev-critical{background:#ff3838;color:#fff}
+  .sev-high{background:#ff6b81;color:#fff}
+  .sev-medium{background:#ffd93d;color:#000}
+  .sev-low{background:#5efc82;color:#000}
+  .priority{margin-left:8px;background:#4facfe;color:#fff;padding:5px 10px;border-radius:6px;font-size:13px;font-weight:700}
   .timer{font-size:13px;margin-top:8px}
   .muted{color:#9aa6b2;font-size:13px}
   .small{font-size:13px}
@@ -161,9 +161,17 @@
         <option value="Logic App Forwarded">Logic App Forwarded</option>
         <option value="Auto-Remediation">Auto-Remediation</option>
       </select>
-      
-      <input type="text" id="audit-search" placeholder="Search audit logs..." onkeyup="filterAuditTable()" 
-             style="flex:1;max-width:400px;padding:8px;background:#161b22;border:1px solid #30363d;color:#e6eef6;border-radius:6px" />
+
+      <label style="color:#9aa6b2;margin-left:15px">Filter by Source:</label>
+      <select id="source-filter" onchange="filterAuditTable()">
+        <option value="all">All Sources</option>
+        <option value="adf">ADF</option>
+        <option value="databricks">Databricks</option>
+        <option value="airflow">Airflow</option>
+      </select>
+
+      <input type="text" id="audit-search" placeholder="Search audit logs..." onkeyup="filterAuditTable()"
+             style="flex:1;max-width:400px;padding:8px;background:#161b22;border:1px solid#30363d;color:#e6eef6;border-radius:6px" />
     </div>
     
     <div id="audit-table-container" class="muted">Loading audit logs...</div>
@@ -174,8 +182,9 @@
 <div id="modal">
   <div class="modal-box">
     <h3 id="m-title"></h3>
+    <div style="margin:10px 0" id="m-severity-priority"></div>
     <p class="muted small">
-      Error Type: <span id="m-error-type">N/A</span> 
+      Error Type: <span id="m-error-type">N/A</span>
       Affected Entity: <span id="m-affected-entity">N/A</span>
     </p>
     <div id="m-finops" style="margin:8px 0"></div>
@@ -413,7 +422,9 @@ function render(){
       <div class="card">
         <div class="title">
           <div><strong>${escapeHtml(t.pipeline||'ADF')}</strong><div class="muted small">${escapeHtml(t.id)}</div></div>
-          <div>${badge}</div>
+        </div>
+        <div style="margin:8px 0;display:flex;gap:6px;align-items:center">
+          ${badge}
         </div>
         <p class="small desc">${escapeHtml(snippet)}</p>
         <div class="muted small">Run: ${escapeHtml(t.run_id||'N/A')}  ${new Date(t.timestamp).toLocaleString()}</div>
@@ -455,6 +466,11 @@ async function openModal(id){
   catch(e){fullTicket=basicTicket;}
   selected=fullTicket;
   document.getElementById('m-title').innerText=`${selected.id}  ${selected.pipeline}`;
+
+  // Display severity and priority badges prominently
+  const modalBadge=`<span class="badge ${sevClass(selected.severity)}">${selected.severity||'Medium'}</span><span class="priority">${selected.priority||'P4'}</span>`;
+  document.getElementById('m-severity-priority').innerHTML=modalBadge;
+
   document.getElementById('m-rca').innerText=selected.rca_result||(selected.root_cause||'');
   document.getElementById('m-error-type').innerText=selected.error_type||'N/A';
   document.getElementById('m-affected-entity').innerText=selected.affected_entity||'N/A';
@@ -482,10 +498,10 @@ async function openModal(id){
     const mttr = selected.ack_seconds ? `MTTR: ${Math.round(selected.ack_seconds/60)} min` : '';
     statusTag.className = "closed-tag";
     statusTag.innerText=`Closed by: ${selected.ack_user||'unknown'} (${selected.ack_empid||'N/A'})  ${ackTime}  ${mttr}`;
-    document.getElementById('m-meta').innerText=`Priority: ${selected.priority||'P4'}  Severity: ${selected.severity||'Medium'}  Status: Closed`;
+    document.getElementById('m-meta').innerText=`Status: Closed`;
   } else {
     closedArea.style.display='none';
-    document.getElementById('m-meta').innerText=`Priority: ${selected.priority||'P4'}  Severity: ${selected.severity||'Medium'} Status: Open`;
+    document.getElementById('m-meta').innerText=`Status: Open`;
   }
   
   document.getElementById('modal').style.display='flex';
@@ -626,21 +642,34 @@ function renderAuditTable(audits){
 
 function filterAuditTable(){
   const searchTerm = document.getElementById('audit-search').value.toLowerCase();
-  if(!searchTerm){
-    renderAuditTable(auditData);
-    return;
+  const sourceFilter = document.getElementById('source-filter').value;
+
+  let filtered = auditData;
+
+  // Apply source filter
+  if(sourceFilter !== 'all'){
+    filtered = filtered.filter(a => {
+      const ticketId = a.ticket_id || '';
+      if(sourceFilter === 'adf') return ticketId.startsWith('ADF-');
+      if(sourceFilter === 'databricks') return ticketId.startsWith('DBX-');
+      if(sourceFilter === 'airflow') return ticketId.startsWith('ARF-');
+      return true;
+    });
   }
-  
-  const filtered = auditData.filter(a => {
-    return (a.ticket_id||'').toLowerCase().includes(searchTerm) ||
-           (a.pipeline||'').toLowerCase().includes(searchTerm) ||
-           (a.action||'').toLowerCase().includes(searchTerm) ||
-           (a.user_name||'').toLowerCase().includes(searchTerm) ||
-           (a.finops_team||'').toLowerCase().includes(searchTerm) ||
-           (a.itsm_ticket_id||'').toLowerCase().includes(searchTerm) ||
-           (a.details||'').toLowerCase().includes(searchTerm);
-  });
-  
+
+  // Apply search term filter
+  if(searchTerm){
+    filtered = filtered.filter(a => {
+      return (a.ticket_id||'').toLowerCase().includes(searchTerm) ||
+             (a.pipeline||'').toLowerCase().includes(searchTerm) ||
+             (a.action||'').toLowerCase().includes(searchTerm) ||
+             (a.user_name||'').toLowerCase().includes(searchTerm) ||
+             (a.finops_team||'').toLowerCase().includes(searchTerm) ||
+             (a.itsm_ticket_id||'').toLowerCase().includes(searchTerm) ||
+             (a.details||'').toLowerCase().includes(searchTerm);
+    });
+  }
+
   renderAuditTable(filtered);
 }
 

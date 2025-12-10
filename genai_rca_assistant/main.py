@@ -45,6 +45,15 @@ from cluster_failure_detector import (
     CLUSTER_ERROR_CATEGORIES
 )
 
+# Airflow integration
+from airflow_integration import (
+    classify_airflow_error,
+    build_airflow_context_for_rca,
+    AIRFLOW_REMEDIABLE_ERRORS
+)
+
+from error_extractors import AirflowExtractor
+
 # Azure Blob Storage imports
 try:
     from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
@@ -917,27 +926,68 @@ def derive_priority(sev):
 def sla_for_priority(p):
     return {"P1":900,"P2":1800,"P3":7200,"P4":86400}.get(p,1800)
 
-def fallback_rca(desc: str, source_type: str = "adf"):
-    """Fallback RCA when AI fails"""
-    service_name = "Databricks job/cluster" if source_type == "databricks" else "ADF pipeline"
+def fallback_rca(desc: str, source_type: str = "adf", error_classification: dict = None):
+    """Fallback RCA when AI fails - now handles ADF, Databricks, and Airflow"""
+
+    # Determine service name based on source type
+    if source_type == "databricks":
+        service_name = "Databricks job/cluster"
+    elif source_type == "airflow":
+        service_name = "Airflow DAG/task"
+    else:  # adf or any other
+        service_name = "ADF pipeline"
+
+    # Use classified error if available, otherwise use generic error
+    if error_classification:
+        error_type = error_classification.get('error_type', 'UnknownError')
+        severity = 'High' if error_classification.get('is_remediable') else 'Medium'
+        is_remediable = error_classification.get('is_remediable', False)
+        remediation_action = error_classification.get('action', 'manual_intervention')
+        category = error_classification.get('category', 'Unknown')
+
+        root_cause = f"{service_name} failed with {error_type} ({category}). "
+        if 'typical_cause' in error_classification:
+            root_cause += error_classification['typical_cause']
+        else:
+            root_cause += "Unable to determine detailed root cause from AI analysis."
+
+        recommendations = [
+            f"Inspect {source_type.upper()} logs for detailed error context.",
+            "Check resource health, configurations, and dependencies.",
+        ]
+
+        if is_remediable:
+            recommendations.insert(0, f"Error appears remediable. Suggested action: {remediation_action}")
+    else:
+        # No classification available - fully generic fallback
+        error_type = "UnknownError"
+        severity = "Medium"
+        is_remediable = False
+        remediation_action = "manual_intervention"
+        root_cause = f"{service_name} failed. Unable to determine root cause from logs."
+        recommendations = [
+            f"Inspect {source_type.upper()} logs for more context.",
+            "Check resource health and configurations."
+        ]
+
     return {
-        "root_cause": f"{service_name} failed. Unable to determine root cause from logs.",
-        "error_type": "UnknownError",
+        "root_cause": root_cause,
+        "error_type": error_type,
         "affected_entity": None,
-        "severity": "Medium",
-        "priority": "P3",
-        "confidence": "Low",
-        "recommendations": [f"Inspect {source_type.upper()} logs for more context.", "Check resource health and configurations."],
+        "severity": severity,
+        "priority": "P2" if severity == "High" else "P3",
+        "confidence": "Medium" if error_classification else "Low",
+        "recommendations": recommendations,
         "auto_heal_possible": False,
-        "is_auto_remediable": False,
-        "remediation_action": "manual_intervention",
-        "remediation_risk": "High",
+        "is_auto_remediable": is_remediable,
+        "remediation_action": remediation_action,
+        "remediation_risk": "Medium" if is_remediable else "High",
         "requires_human_approval": True,
         "business_impact": "Medium",
-        "estimated_resolution_time_minutes": 30
+        "estimated_resolution_time_minutes": 15 if is_remediable else 30
     }
 
-def generate_rca_and_recs(desc, source_type="adf"):
+def generate_rca_and_recs(desc, source_type="adf", error_classification=None):
     """
     Generate RCA using configured AI provider(s)
     AI_PROVIDER options: 'gemini', 'ollama', 'auto'
@@ -998,8 +1048,8 @@ def generate_rca_and_recs(desc, source_type="adf"):
             logger.info("Gemini RCA successful for %s", source_type.upper())
             return ai
 
-    # All AI attempts failed, use static fallback
-    return fallback_rca(desc, source_type)
+    # All AI attempts failed, use static fallback with error classification
+    return fallback_rca(desc, source_type, error_classification)
 
 # --- ITSM Integration Functions ---
 def _get_jira_auth() -> Optional[HTTPBasicAuth]:
@@ -1061,6 +1111,76 @@ def create_jira_ticket(ticket_id: str, pipeline: str, rca_data: dict, finops: di
     except Exception as e:
         logger.error(f"Exception while creating Jira ticket: {e}")
         return None
+
+async def update_jira_ticket_status(jira_ticket_id: str, new_status: str, comment: str = None):
+    """Updates JIRA ticket status and optionally adds a comment"""
+    auth = _get_jira_auth()
+    if not (JIRA_DOMAIN and auth):
+        logger.warning("JIRA settings incomplete. Cannot update ticket status.")
+        return False
+
+    try:
+        # Get available transitions for this issue
+        transitions_url = f"{JIRA_DOMAIN}/rest/api/3/issue/{jira_ticket_id}/transitions"
+        r = requests.get(transitions_url, auth=auth, timeout=10)
+
+        if r.status_code != 200:
+            logger.warning(f"Failed to get JIRA transitions: {r.status_code} {r.text}")
+            return False
+
+        transitions = r.json().get("transitions", [])
+
+        # Find transition ID for the desired status
+        transition_id = None
+        for t in transitions:
+            if t.get("to", {}).get("name", "").lower() == new_status.lower():
+                transition_id = t.get("id")
+                break
+
+        if not transition_id:
+            logger.warning(f"No transition found for status '{new_status}' in JIRA ticket {jira_ticket_id}")
+            return False
+
+        # Perform the transition
+        transition_payload = {
+            "transition": {"id": transition_id}
+        }
+
+        r = requests.post(transitions_url, auth=auth, json=transition_payload, timeout=10)
+
+        if r.status_code not in [200, 204]:
+            logger.warning(f"Failed to update JIRA status: {r.status_code} {r.text}")
+            return False
+
+        logger.info(f"Successfully updated JIRA ticket {jira_ticket_id} to status '{new_status}'")
+
+        # Add comment if provided
+        if comment:
+            comment_url = f"{JIRA_DOMAIN}/rest/api/3/issue/{jira_ticket_id}/comment"
+            comment_payload = {
+                "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": comment
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+            requests.post(comment_url, auth=auth, json=comment_payload, timeout=10)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Exception while updating JIRA ticket status: {e}")
+        return False
 
 # --- FastAPI App ---
 app = FastAPI(title="AIOps RCA Assistant")
@@ -1167,6 +1287,65 @@ def update_slack_message_on_ack(ticket_id: str, user_name: str):
             logger.warning("Slack update failed: %s %s", r.status_code, r.text)
         else:
             logger.info(f"Slack message updated for ticket {ticket_id}")
+    except Exception as e:
+        logger.warning("Slack update post exception: %s", e)
+
+def update_slack_message_on_reopen(ticket_id: str, reason: str = "Ticket reopened"):
+    """Updates Slack message when ticket is reopened"""
+    if not SLACK_BOT_TOKEN: return
+    row = db_query("SELECT * FROM tickets WHERE id=:id", {"id": ticket_id}, one=True)
+    if not (row and row.get("slack_ts") and row.get("slack_channel")):
+        logger.warning("Cannot update Slack message: Missing slack_ts or channel for %s", ticket_id)
+        return
+
+    title = row.get("pipeline", "ADF Alert")
+    run_id = row.get("run_id", "N/A")
+    root = row.get("rca_result", "N/A")
+    confidence = row.get("confidence", "Low")
+    error_type = row.get("error_type", "N/A")
+    severity = row.get("severity", "Medium")
+    priority = row.get("priority", derive_priority(severity))
+    itsm_ticket_id = row.get("itsm_ticket_id")
+
+    try:
+        recs = json.loads(row.get("recommendations", "[]"))
+    except Exception:
+        recs = []
+
+    itsm_info = f"\n*ITSM Ticket:* `{itsm_ticket_id}`" if itsm_ticket_id else ""
+
+    blocks = [
+        {"type":"header","text":{"type":"plain_text","text":f"REOPENED: {title} - {severity} ({priority})"}},
+        {"type":"section", "text": {"type":"mrkdwn", "text": f"*Ticket:* `{ticket_id}`{itsm_info}\n*Run ID:* `{run_id}`\n*Status:* `OPEN`"}},
+        {"type":"context", "elements": [{"type": "mrkdwn", "text": f"{reason} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"}]},
+        {"type":"divider"},
+        {"type":"section", "text": {"type":"mrkdwn", "text": f"*Root Cause:* {root}\n*Confidence:* {confidence}\n*Error Type:* `{error_type}`"}},
+    ]
+
+    if recs:
+        rec_text = "\n".join([f"* {r}" for r in recs])
+        blocks.append({"type":"section", "text": {"type":"mrkdwn", "text": f"*Resolution Steps:*\n{rec_text}"}})
+
+    dash_url = f"{PUBLIC_BASE_URL.rstrip('/')}/dashboard"
+    blocks.append({
+        "type":"actions",
+        "elements":[{"type":"button","text":{"type":"plain_text","text":"Open in Dashboard"},"url":dash_url, "style": "danger"}]
+    })
+
+    payload = {
+        "channel": row["slack_channel"],
+        "ts": row["slack_ts"],
+        "blocks": blocks,
+        "text": f"Ticket {ticket_id}: {title} - REOPENED"
+    }
+    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
+
+    try:
+        r = requests.post("https://slack.com/api/chat.update", headers=headers, json=payload, timeout=10)
+        if r.status_code != 200:
+            logger.warning("Slack update failed: %s %s", r.status_code, r.text)
+        else:
+            logger.info(f"Slack message updated for reopened ticket {ticket_id}")
     except Exception as e:
         logger.warning("Slack update post exception: %s", e)
 
@@ -1325,15 +1504,22 @@ async def trigger_auto_remediation(ticket_id: str, pipeline_name: str, error_typ
                       "response": json.dumps(response_data), "ticket_id": ticket_id, "attempt_number": attempt_number})
             logger.info(f"[AUTO-REM] Updated remediation attempt with actual run_id: {remediation_run_id}")
 
-            # Update ticket
+            # Update ticket - set both remediation_status and main status to in_progress
             db_execute('''UPDATE tickets
-                        SET remediation_status = :status,
+                        SET remediation_status = :rem_status,
+                            status = :main_status,
                             remediation_run_id = :run_id,
                             remediation_attempts = :attempts,
                             remediation_last_attempt_at = :last_attempt
                         WHERE id = :id''',
-                     {"status": "in_progress", "run_id": remediation_run_id, "attempts": attempt_number,
-                      "last_attempt": datetime.now(timezone.utc).isoformat(), "id": ticket_id})
+                     {"rem_status": "in_progress", "main_status": "in_progress", "run_id": remediation_run_id,
+                      "attempts": attempt_number, "last_attempt": datetime.now(timezone.utc).isoformat(), "id": ticket_id})
+
+            # Sync status to JIRA
+            ticket_row = db_query("SELECT itsm_ticket_id FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
+            if ticket_row and ticket_row.get("itsm_ticket_id"):
+                await update_jira_ticket_status(ticket_row["itsm_ticket_id"], "In Progress",
+                                               f"Auto-remediation in progress (Attempt {attempt_number})")
 
             # Log audit trail
             log_audit(
@@ -1455,15 +1641,22 @@ async def trigger_databricks_remediation(ticket_id: str, job_name: str, job_id: 
                       "remediation_action": remediation_action, "logic_app_response": json.dumps(response_data),
                       "started_at": datetime.now(timezone.utc).isoformat()})
 
-            # Update ticket
+            # Update ticket - set both remediation_status and main status to in_progress
             db_execute('''UPDATE tickets
-                        SET remediation_status = :status,
+                        SET remediation_status = :rem_status,
+                            status = :main_status,
                             remediation_run_id = :run_id,
                             remediation_attempts = :attempts,
                             remediation_last_attempt_at = :last_attempt
                         WHERE id = :id''',
-                     {"status": "in_progress", "run_id": remediation_run_id, "attempts": attempt_number,
-                      "last_attempt": datetime.now(timezone.utc).isoformat(), "id": ticket_id})
+                     {"rem_status": "in_progress", "main_status": "in_progress", "run_id": remediation_run_id,
+                      "attempts": attempt_number, "last_attempt": datetime.now(timezone.utc).isoformat(), "id": ticket_id})
+
+            # Sync status to JIRA
+            ticket_row = db_query("SELECT itsm_ticket_id FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
+            if ticket_row and ticket_row.get("itsm_ticket_id"):
+                await update_jira_ticket_status(ticket_row["itsm_ticket_id"], "In Progress",
+                                               f"Auto-remediation in progress for Databricks (Attempt {attempt_number})")
 
             # Log audit trail
             log_audit(
@@ -1681,7 +1874,7 @@ async def handle_remediation_failure(ticket_id: str, pipeline_name: str,
     - Checks if retries available based on risk level
     - Triggers retry or escalates to manual
     """
-    logger.warning(f"[AUTO-REM] ❌ Auto-remediation attempt {attempt_number} failed for {ticket_id}")
+    logger.warning(f"[AUTO-REM] Auto-remediation attempt {attempt_number} failed for {ticket_id}")
 
     now = datetime.now(timezone.utc).isoformat()
     failure_reason = run_data.get("message", "Unknown failure")
@@ -1859,7 +2052,7 @@ async def send_slack_remediation_started(ticket_id: str, pipeline_name: str,
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"🤖 *Auto-remediation initiated for `{pipeline_name}`*\n"
+            "text": f"*Auto-remediation initiated for `{pipeline_name}`*\n"
                     f"Ticket: {ticket_id}\n"
                     f"Attempt: {attempt_number}/{max_retries}\n"
                     f"Action: Re-running pipeline..."
@@ -1870,7 +2063,7 @@ async def send_slack_remediation_started(ticket_id: str, pipeline_name: str,
         "channel": channel,
         "thread_ts": thread_ts,
         "blocks": blocks,
-        "text": f"🤖 Auto-remediation attempt {attempt_number} for {pipeline_name}"
+        "text": f"Auto-remediation attempt {attempt_number} for {pipeline_name}"
     }
     headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
 
@@ -1897,7 +2090,7 @@ async def send_slack_remediation_retry(ticket_id: str, pipeline_name: str,
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"🔄 *Retry attempt {attempt_number}/{max_retries}*\n"
+            "text": f"*Retry attempt {attempt_number}/{max_retries}*\n"
                     f"Previous attempt failed, retrying auto-remediation for `{pipeline_name}`..."
         }
     }]
@@ -1906,7 +2099,7 @@ async def send_slack_remediation_retry(ticket_id: str, pipeline_name: str,
         "channel": channel,
         "thread_ts": thread_ts,
         "blocks": blocks,
-        "text": f"🔄 Retry attempt {attempt_number} for {pipeline_name}"
+        "text": f"Retry attempt {attempt_number} for {pipeline_name}"
     }
     headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
 
@@ -2001,7 +2194,7 @@ async def send_slack_approval_request(ticket_id: str, pipeline_name: str,
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "⚠️ Human Approval Required for Auto-Remediation"}
+            "text": {"type": "plain_text", "text": "Human Approval Required for Auto-Remediation"}
         },
         {
             "type": "section",
@@ -2055,7 +2248,7 @@ async def send_slack_approval_request(ticket_id: str, pipeline_name: str,
             },
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "❌ Reject & Manual Fix"},
+                "text": {"type": "plain_text", "text": "Reject & Manual Fix"},
                 "style": "danger",
                 "value": f"reject_{ticket_id}",
                 "action_id": "reject_remediation"
@@ -2073,7 +2266,7 @@ async def send_slack_approval_request(ticket_id: str, pipeline_name: str,
         "channel": channel,
         "thread_ts": thread_ts,
         "blocks": blocks,
-        "text": f"⚠️ Approval required for auto-remediation of {pipeline_name}"
+        "text": f"Approval required for auto-remediation of {pipeline_name}"
     }
     headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
 
@@ -2118,7 +2311,7 @@ async def send_slack_escalation_alert(channel: str, ts: str, ticket_id: str,
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "⚠️ Auto-Remediation Failed - Manual Intervention Required"}
+            "text": {"type": "plain_text", "text": "Auto-Remediation Failed - Manual Intervention Required"}
         },
         {
             "type": "section",
@@ -2155,7 +2348,7 @@ async def send_slack_escalation_alert(channel: str, ts: str, ticket_id: str,
         "channel": channel,
         "thread_ts": ts,
         "blocks": blocks,
-        "text": f"⚠️ Auto-remediation failed for {pipeline_name} after {attempts} attempts"
+        "text": f"Auto-remediation failed for {pipeline_name} after {attempts} attempts"
     }
     headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
 
@@ -2389,8 +2582,8 @@ async def azure_monitor(request: Request):
 
     try:
         pipeline, runid, desc, metadata = AzureDataFactoryExtractor.extract(body)
-        logger.info(f"✓ Extracted via AzureDataFactoryExtractor: pipeline={pipeline}, run_id={runid}")
-        logger.info(f"✓ Error message length: {len(desc)} chars")
+        logger.info(f"Extracted via AzureDataFactoryExtractor: pipeline={pipeline}, run_id={runid}")
+        logger.info(f"Error message length: {len(desc)} chars")
         logic_app_run_id = metadata.get("logic_app_run_id", "N/A")
         processing_mode = "direct_webhook"
     except Exception as e:
@@ -2481,25 +2674,26 @@ async def azure_monitor(request: Request):
     """, {"pipeline": pipeline}, one=True)
 
     if active_remediation:
-        logger.info(f"[WEBHOOK-DEDUP] Active remediation found for pipeline {pipeline}")
-        logger.info(f"[WEBHOOK-DEDUP] Ticket: {active_remediation['id']}, Attempts: {active_remediation.get('remediation_attempts', 0)}")
-        logger.info(f"[WEBHOOK-DEDUP] Webhook run_id: {runid}, Original ticket run_id: {active_remediation.get('run_id')}")
+        logger.debug(f"[WEBHOOK-DEDUP] Active remediation found for pipeline {pipeline}")
+        logger.debug(f"[WEBHOOK-DEDUP] Ticket: {active_remediation['id']}, Attempts: {active_remediation.get('remediation_attempts', 0)}")
+        logger.debug(f"[WEBHOOK-DEDUP] Webhook run_id: {runid}, Original ticket run_id: {active_remediation.get('run_id')}")
 
         # This webhook is likely for a remediation retry failure
         # DO NOT create new ticket - callback will handle it
-        log_audit(
-            ticket_id=active_remediation['id'],
-            action="webhook_ignored_during_remediation",
-            pipeline=pipeline,
-            run_id=runid,
-            details=f"Webhook received during active remediation. Callback will handle retry logic. Remediation attempts: {active_remediation.get('remediation_attempts', 0)}"
-        )
+        # Only log audit trail if this is a different run_id (actual retry), not just duplicate webhook
+        if runid != active_remediation.get('run_id'):
+            log_audit(
+                ticket_id=active_remediation['id'],
+                action="webhook_ignored_during_remediation",
+                pipeline=pipeline,
+                run_id=runid,
+                details=f"Webhook received during active remediation (different run). Callback will handle retry logic. Remediation attempts: {active_remediation.get('remediation_attempts', 0)}"
+            )
 
         return JSONResponse({
             "status": "ignored_during_remediation",
             "ticket_id": active_remediation['id'],
-            "message": "Active remediation in progress - callback will handle retry logic",
-            "remediation_attempts": active_remediation.get('remediation_attempts', 0)
+            "message": "Duplicate webhook ignored - active remediation in progress"
         })
 
     finops_tags = extract_finops_tags(pipeline)
@@ -2762,8 +2956,8 @@ async def remediation_callback(request: Request):
             })
 
         elif is_failed:
-            # ❌ FAILED - Retry or escalate
-            logger.warning(f"[CALLBACK] ❌ Remediation FAILED for {ticket_id}, attempt {attempt_number}")
+            # FAILED - Retry or escalate
+            logger.warning(f"[CALLBACK] Remediation FAILED for {ticket_id}, attempt {attempt_number}")
 
             await handle_remediation_failure(
                 ticket_id=ticket_id,
@@ -2860,7 +3054,7 @@ async def databricks_monitor(request: Request):
                     )
 
         except Exception as e:
-            logger.error(f"❌ Error parsing Azure Monitor cluster failure payload: {e}")
+            logger.error(f"Error parsing Azure Monitor cluster failure payload: {e}")
 
     # ===================================================================================
     # STEP 3: Databricks Job Failure Handling (Webhook or other job alerts)
@@ -2921,7 +3115,7 @@ async def databricks_monitor(request: Request):
     if run_id:
         api_fetch_attempted = True
         try:
-            logger.info(f"🔄 Fetching Databricks API details for run_id={run_id}")
+            logger.info(f"Fetching Databricks API details for run_id={run_id}")
             run_details = fetch_databricks_run_details(run_id)
 
             if run_details:
@@ -2937,7 +3131,7 @@ async def databricks_monitor(request: Request):
                 cluster_id = run_details.get("cluster_instance", {}).get("cluster_id") or cluster_id
 
         except Exception as e:
-            logger.error(f"❌ Failed API fetch for run_id={run_id}: {e}")
+            logger.error(f"Failed API fetch for run_id={run_id}: {e}")
 
     logger.info("=" * 120)
     logger.info(f"📤 FINAL ERROR SENT TO RCA ENGINE:\n{error_message[:500]}")
@@ -3018,7 +3212,7 @@ async def process_databricks_failure(job_name, run_id, job_id, cluster_id, error
         if remediation_attempt:
             original_ticket_id = remediation_attempt["ticket_id"]
             logger.warning(f"❗ This run_id ({run_id}) is a remediation attempt for ticket {original_ticket_id}")
-            logger.info(f"🔄 Remediation run failed - will be handled by callback, not creating new ticket")
+            logger.info(f"Remediation run failed - will be handled by callback, not creating new ticket")
             return {
                 "status": "remediation_run_failed",
                 "ticket_id": original_ticket_id,
@@ -3047,7 +3241,7 @@ async def process_databricks_failure(job_name, run_id, job_id, cluster_id, error
 
             if recent_remediation:
                 logger.warning(f"⏸️ Recent remediation in progress for job {job_name}, waiting for callback")
-                logger.info(f"🔄 This appears to be a retry from ongoing remediation for ticket {recent_remediation['id']}")
+                logger.info(f"This appears to be a retry from ongoing remediation for ticket {recent_remediation['id']}")
                 return {
                     "status": "remediation_in_progress",
                     "ticket_id": recent_remediation["id"],
@@ -3069,7 +3263,7 @@ async def process_databricks_failure(job_name, run_id, job_id, cluster_id, error
 
     # Detect if this is a cluster-related failure
     logger.info("=" * 80)
-    logger.info("🔍 ANALYZING ERROR FOR CLUSTER FAILURE PATTERNS")
+    logger.info("ANALYZING ERROR FOR CLUSTER FAILURE PATTERNS")
     logger.info("=" * 80)
 
     cluster_analysis = is_cluster_related_error(error_message, run_details)
@@ -3147,12 +3341,12 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
                     logger.info("=" * 80)
 
                 else:
-                    logger.warning(f"⚠️ Could not fetch cluster details for {cluster_id}")
+                    logger.warning(f"Could not fetch cluster details for {cluster_id}")
 
             except Exception as e:
-                logger.error(f"❌ Error fetching cluster information: {e}")
+                logger.error(f"Error fetching cluster information: {e}")
         else:
-            logger.warning(f"⚠️ Cluster failure detected but no cluster_id available for detailed analysis")
+            logger.warning(f"Cluster failure detected but no cluster_id available for detailed analysis")
 
     else:
         logger.info(f"ℹ️ NOT a cluster failure - likely application/data error")
@@ -3274,7 +3468,7 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
                           {"url": blob_url, "id": tid})
                 logger.info(f"✅ Databricks logs uploaded to blob for ticket {tid}")
         except Exception as e:
-            logger.error(f"❌ Failed to upload Databricks logs to blob: {e}")
+            logger.error(f"Failed to upload Databricks logs to blob: {e}")
 
     # -----------------------
     # AUDIT LOG
@@ -3395,6 +3589,378 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
 
 ###########################################################################################################################
 
+@app.post("/airflow-monitor")
+async def airflow_monitor(request: Request):
+    """
+    Webhook endpoint for Airflow task/DAG failures.
+    Receives callbacks from Airflow's on_failure_callback.
+    """
+    # ------------------------------------------
+    # STEP 1: Parse raw payload
+    # ------------------------------------------
+    try:
+        body = await request.json()
+    except Exception as e:
+        logger.error(f"Invalid JSON body from Airflow webhook: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    logger.info("=" * 120)
+    logger.info("AIRFLOW MONITORING PAYLOAD RECEIVED 🌪️")
+    logger.info(json.dumps(body, indent=2))
+    logger.info("=" * 120)
+
+    # ------------------------------------------
+    # STEP 2: Extract error details using AirflowExtractor
+    # ------------------------------------------
+    try:
+        dag_id, task_id, error_message, metadata = AirflowExtractor.extract(body)
+    except Exception as e:
+        logger.error(f"Failed to extract Airflow error details: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse Airflow payload: {e}")
+
+    logger.info(f"📌 Airflow Failure: DAG={dag_id}, Task={task_id}")
+    logger.info(f"📌 Error: {error_message[:200]}...")
+
+    # ------------------------------------------
+    # STEP 3: Duplicate check (by DAG + Task + recent time)
+    # ------------------------------------------
+    run_id = metadata.get('run_id')
+
+    # Check if we already have a ticket for this run_id
+    if run_id:
+        existing = db_query(
+            "SELECT id, status FROM tickets WHERE run_id = :run_id AND processing_mode = 'airflow-arf'",
+            {"run_id": run_id},
+            one=True
+        )
+        if existing:
+            logger.warning(f"❗ Duplicate Airflow run detected: run_id={run_id}")
+            return {
+                "status": "duplicate_ignored",
+                "ticket_id": existing["id"],
+                "message": f"Ticket already exists for run_id {run_id}"
+            }
+
+    # Additional duplicate check by DAG+Task+time
+    pipeline_name = f"{dag_id}/{task_id}"
+    recent_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    recent_ticket = db_query(
+        '''SELECT id, status, timestamp FROM tickets
+           WHERE pipeline = :pipeline_name
+           AND processing_mode = 'airflow-arf'
+           AND timestamp > :cutoff
+           ORDER BY timestamp DESC
+           LIMIT 1''',
+        {"pipeline_name": pipeline_name, "cutoff": recent_cutoff},
+        one=True
+    )
+    if recent_ticket:
+        logger.warning(f"❗ Recent Airflow ticket found for {pipeline_name} within 5 minutes: {recent_ticket['id']}")
+        return {
+            "status": "duplicate_ignored",
+            "ticket_id": recent_ticket["id"],
+            "message": f"Recent ticket already exists for {pipeline_name}"
+        }
+
+    # ------------------------------------------
+    # STEP 4: Classify Airflow error
+    # ------------------------------------------
+    error_classification = classify_airflow_error(error_message)
+
+    if error_classification:
+        logger.info(f"✅ Classified as: {error_classification['error_type']} ({error_classification['category']})")
+        logger.info(f"   Remediable: {error_classification['is_remediable']}")
+        logger.info(f"   Action: {error_classification.get('action', 'N/A')}")
+    else:
+        logger.info(" Error not classified in AIRFLOW_REMEDIABLE_ERRORS")
+
+    # ------------------------------------------
+    # STEP 5: Build enriched context for RCA
+    # ------------------------------------------
+    enriched_context = build_airflow_context_for_rca(body, error_classification)
+
+    # ------------------------------------------
+    # STEP 6: Generate RCA using Gemini (with error classification for fallback)
+    # ------------------------------------------
+    logger.info("Generating RCA for Airflow failure...")
+    rca = generate_rca_and_recs(enriched_context, source_type="airflow", error_classification=error_classification)
+
+    # ------------------------------------------
+    # STEP 7: Create ticket
+    # ------------------------------------------
+    # Generate Airflow ticket ID with ARF prefix (same format as ADF/DBX)
+    ticket_id = f"ARF-{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    timestamp_iso = datetime.now(timezone.utc).isoformat()
+
+    # Extract finops tags (if any)
+    finops_tags = extract_finops_tags(dag_id, "airflow")
+
+    # Determine error type and severity
+    error_type = error_classification.get('error_type', 'Unknown') if error_classification else 'UnknownAirflowError'
+    severity = 'High' if error_classification and error_classification.get('is_remediable') else 'Medium'
+
+    # Build affected_entity with Airflow metadata (similar to cluster metadata)
+    affected_entity = {
+        "dag_id": dag_id,
+        "task_id": task_id,
+        "execution_date": metadata.get('execution_date'),
+        "try_number": metadata.get('try_number'),
+        "max_tries": metadata.get('max_tries'),
+        "operator": metadata.get('operator'),
+        "log_url": metadata.get('log_url'),
+        "airflow_base_url": metadata.get('airflow_base_url'),
+        "error_classification": error_classification
+    }
+
+    # Prepare ticket data
+    ticket_data = {
+        "id": ticket_id,
+        "timestamp": timestamp_iso,
+        "pipeline": pipeline_name,
+        "run_id": run_id,
+        "rca_result": rca.get("root_cause", "Unable to generate RCA"),  # Fixed: use 'root_cause' key
+        "recommendations": json.dumps(rca.get("recommendations", [])),
+        "confidence": rca.get("confidence", 0.0),
+        "severity": severity,
+        "priority": "P2" if severity == "High" else "P3",
+        "error_type": rca.get("error_type", error_type),  # Use RCA error type if available
+        "affected_entity": json.dumps(affected_entity),
+        "status": "open",  # lowercase to match dashboard queries
+        "sla_seconds": 14400,  # 4 hours default SLA
+        "sla_status": "Pending",  # Match Databricks format
+        "finops_team": finops_tags.get("team"),  # Extract team from finops_tags
+        "finops_owner": finops_tags.get("owner"),  # Extract owner email
+        "finops_cost_center": finops_tags.get("cost_center"),  # Extract cost center
+        "processing_mode": "airflow-arf"
+    }
+
+    # Insert ticket using db_execute
+    db_execute("""
+        INSERT INTO tickets (
+            id, timestamp, pipeline, run_id, rca_result, recommendations, confidence,
+            severity, priority, error_type, affected_entity, status, sla_seconds, sla_status,
+            finops_team, finops_owner, finops_cost_center, processing_mode
+        ) VALUES (
+            :id, :timestamp, :pipeline, :run_id, :rca_result, :recommendations, :confidence,
+            :severity, :priority, :error_type, :affected_entity, :status, :sla_seconds, :sla_status,
+            :finops_team, :finops_owner, :finops_cost_center, :processing_mode
+        )
+    """, ticket_data)
+
+    logger.info(f"🎫 Ticket created: {ticket_id}")
+
+    # -----------------------
+    # AUDIT LOG
+    # -----------------------
+    log_audit(
+        ticket_id=ticket_id,
+        action="Ticket Created",
+        pipeline=pipeline_name,
+        run_id=run_id or "N/A",
+        rca_summary=rca.get("root_cause", "")[:150],
+        details=f"Source=Airflow DAG Failure. DAG={dag_id}, Task={task_id}",
+        finops_team=finops_tags.get("team"),
+        finops_owner=finops_tags.get("owner")
+    )
+
+    # -----------------------
+    # JIRA TICKET CREATION
+    # -----------------------
+    if ITSM_TOOL == "jira":
+        try:
+            itsm_id = await asyncio.to_thread(create_jira_ticket, ticket_id, pipeline_name, rca, finops_tags, run_id)
+            if itsm_id:
+                db_execute("UPDATE tickets SET itsm_ticket_id = :id WHERE id = :tid",
+                           {"id": itsm_id, "tid": ticket_id})
+        except Exception as e:
+            logger.error(f"Jira error: {e}")
+
+    # -----------------------
+    # BROADCAST WEBSOCKET
+    # -----------------------
+    try:
+        await manager.broadcast({"event": "new_ticket", "ticket_id": ticket_id})
+    except:
+        pass
+
+    # -----------------------
+    # SLACK NOTIFICATION
+    # -----------------------
+    try:
+        essentials = {"alertRule": pipeline_name, "runId": run_id, "pipelineName": pipeline_name}
+        post_slack_notification(ticket_id, essentials, rca, None)
+    except:
+        pass
+
+    logger.info("=" * 120)
+    logger.info(f"✅ AIRFLOW TICKET PROCESSING COMPLETE: {ticket_id}")
+    logger.info("=" * 120)
+
+    return {
+        "status": "ticket_created",
+        "ticket_id": ticket_id,
+        "dag_id": dag_id,
+        "task_id": task_id,
+        "run_id": run_id
+    }
+
+@app.post("/jira-webhook")
+async def jira_webhook(request: Request):
+    """
+    JIRA webhook endpoint to handle status changes and sync back to RCA system
+    Configure in JIRA: Project Settings -> Webhooks -> Add webhook
+    URL: https://your-domain/jira-webhook
+    Events: Issue Updated
+    """
+    try:
+        body = await request.json()
+        logger.info(f"JIRA webhook received: {json.dumps(body, indent=2)}")
+
+        # Extract webhook event details
+        webhook_event = body.get("webhookEvent")
+        issue = body.get("issue", {})
+        changelog = body.get("changelog", {})
+
+        if webhook_event != "jira:issue_updated":
+            logger.info(f"Ignoring JIRA webhook event: {webhook_event}")
+            return {"status": "ignored", "reason": "Not an issue update event"}
+
+        # Get JIRA issue key
+        jira_key = issue.get("key")
+        if not jira_key:
+            logger.warning("JIRA webhook missing issue key")
+            return {"status": "error", "message": "Missing issue key"}
+
+        # Find ticket by JIRA ID
+        ticket = db_query("SELECT id, status, pipeline FROM tickets WHERE itsm_ticket_id = :jira_key",
+                         {"jira_key": jira_key}, one=True)
+
+        if not ticket:
+            logger.info(f"No ticket found for JIRA key {jira_key}")
+            return {"status": "ignored", "reason": "Ticket not found in RCA system"}
+
+        ticket_id = ticket["id"]
+        old_status = ticket["status"]
+
+        # Check for status changes in changelog
+        status_changed = False
+        new_jira_status = None
+
+        for item in changelog.get("items", []):
+            if item.get("field") == "status":
+                new_jira_status = item.get("toString", "").lower()
+                old_jira_status = item.get("fromString", "").lower()
+                status_changed = True
+                logger.info(f"JIRA status change detected: {old_jira_status} -> {new_jira_status}")
+                break
+
+        if not status_changed:
+            logger.info("No status change in JIRA webhook")
+            return {"status": "ignored", "reason": "No status change"}
+
+        # Map JIRA status to RCA system status
+        # JIRA "Done/Resolved/Closed" -> RCA "acknowledged"
+        # JIRA "In Progress/Selected for Development/In Review" -> RCA "in_progress"
+        # JIRA "To Do/Open/Backlog/Reopened" -> RCA "open"
+
+        new_rca_status = old_status  # default to current
+
+        if new_jira_status in ["done", "resolved", "closed"]:
+            new_rca_status = "acknowledged"
+        elif new_jira_status in ["in progress", "selected for development", "in review"]:
+            new_rca_status = "in_progress"
+        elif new_jira_status in ["to do", "open", "backlog", "reopened"]:
+            new_rca_status = "open"
+
+        # Update ticket status if changed
+        if new_rca_status != old_status:
+            logger.info(f"Updating ticket {ticket_id} status: {old_status} -> {new_rca_status}")
+
+            db_execute("""UPDATE tickets
+                         SET status = :new_status
+                         WHERE id = :ticket_id""",
+                      {"new_status": new_rca_status, "ticket_id": ticket_id})
+
+            # Send Slack notification based on status change
+            if old_status == "acknowledged" and new_rca_status != "acknowledged":
+                # Ticket was closed and now reopened (to any non-closed status)
+                update_slack_message_on_reopen(ticket_id, f"JIRA status changed to {new_jira_status}")
+
+                # Log audit trail
+                log_audit(
+                    ticket_id=ticket_id,
+                    action="Ticket Reopened",
+                    pipeline=ticket["pipeline"],
+                    details=f"Ticket reopened via JIRA status change to {new_jira_status} (RCA status: {new_rca_status})",
+                    itsm_ticket_id=jira_key
+                )
+            elif new_rca_status == "acknowledged" and old_status != "acknowledged":
+                # Ticket was closed via JIRA
+                update_slack_message_on_ack(ticket_id, "JIRA System")
+
+                # Calculate MTTR
+                created = db_query("SELECT timestamp FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
+                if created:
+                    created_time = datetime.fromisoformat(created["timestamp"])
+                    ack_time = datetime.utcnow()
+                    ack_seconds = int((ack_time - created_time).total_seconds())
+
+                    db_execute("""UPDATE tickets
+                                 SET ack_ts = :ack_ts, ack_seconds = :ack_seconds,
+                                     ack_user = :ack_user, ack_empid = :ack_empid
+                                 WHERE id = :id""",
+                              {"ack_ts": ack_time.isoformat(), "ack_seconds": ack_seconds,
+                               "ack_user": "JIRA System", "ack_empid": "AUTO", "id": ticket_id})
+
+                # Log audit trail
+                log_audit(
+                    ticket_id=ticket_id,
+                    action="Ticket Closed",
+                    pipeline=ticket["pipeline"],
+                    details=f"Ticket closed via JIRA status change to {new_jira_status}",
+                    itsm_ticket_id=jira_key,
+                    user_name="JIRA System",
+                    user_empid="AUTO"
+                )
+            elif new_rca_status == "in_progress" and old_status not in ["acknowledged", "in_progress"]:
+                # Moved to in-progress from open
+                logger.info(f"Ticket {ticket_id} moved to in_progress via JIRA")
+
+                # Log audit trail
+                log_audit(
+                    ticket_id=ticket_id,
+                    action="Status Updated",
+                    pipeline=ticket["pipeline"],
+                    details=f"Ticket status changed to in_progress via JIRA status {new_jira_status}",
+                    itsm_ticket_id=jira_key
+                )
+
+            # Broadcast status change to WebSocket clients
+            await manager.broadcast({
+                "event": "status_update",
+                "ticket_id": ticket_id,
+                "old_status": old_status,
+                "new_status": new_rca_status,
+                "source": "jira_webhook"
+            })
+
+            return {
+                "status": "success",
+                "ticket_id": ticket_id,
+                "old_status": old_status,
+                "new_status": new_rca_status,
+                "jira_status": new_jira_status
+            }
+        else:
+            logger.info(f"JIRA status {new_jira_status} maps to same RCA status {old_status}, no update needed")
+            return {"status": "no_change", "message": "Status already matches"}
+
+    except Exception as e:
+        logger.error(f"Error processing JIRA webhook: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+###########################################################################################################################
+
 # --- Protected Endpoints (Require Auth) ---
 def _get_ticket_columns():
     return ("id, timestamp, pipeline, run_id, rca_result, recommendations, confidence, severity, priority, "
@@ -3418,7 +3984,7 @@ async def get_ticket_details(ticket_id: str, current_user: dict = Depends(get_cu
 @app.get("/api/open-tickets")
 async def api_open_tickets(current_user: dict = Depends(get_current_user)):
     columns = _get_ticket_columns()
-    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'open' ORDER BY timestamp DESC")
+    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'open' AND (remediation_status IS NULL OR remediation_status != 'applied_not_solved') ORDER BY timestamp DESC")
     for r in rows:
         if isinstance(r.get("recommendations"), str):
             try:
@@ -3430,7 +3996,7 @@ async def api_open_tickets(current_user: dict = Depends(get_current_user)):
 @app.get("/api/in-progress-tickets")
 async def api_in_progress_tickets(current_user: dict = Depends(get_current_user)):
     columns = _get_ticket_columns()
-    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'in_progress' ORDER BY timestamp DESC")
+    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'in_progress' AND (remediation_status IS NULL OR remediation_status != 'applied_not_solved') ORDER BY timestamp DESC")
     for r in rows:
         if isinstance(r.get("recommendations"), str):
             try:
@@ -3472,7 +4038,7 @@ async def api_remediation_failed_tickets(current_user: dict = Depends(get_curren
 async def api_summary(current_user: dict = Depends(get_current_user)):
     tickets = db_query("SELECT * FROM tickets")
     total = len(tickets)
-    open_tickets_list = [t for t in tickets if t.get("status") != "acknowledged"]
+    open_tickets_list = [t for t in tickets if t.get("status") != "acknowledged" and t.get("remediation_status") != "applied_not_solved"]
     ack_tickets = [t for t in tickets if t.get("status") == "acknowledged"]
     breached = [t for t in tickets if str(t.get("sla_status", "")).lower() == "breached"]
     ack_times = []
@@ -3556,7 +4122,7 @@ async def api_config():
 @app.get("/api/export/open-tickets")
 async def export_open_tickets(current_user: dict = Depends(get_current_user)):
     columns = _get_ticket_columns()
-    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'open' ORDER BY timestamp DESC")
+    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'open' AND (remediation_status IS NULL OR remediation_status != 'applied_not_solved') ORDER BY timestamp DESC")
 
     output = StringIO()
     if rows:
@@ -3575,7 +4141,7 @@ async def export_open_tickets(current_user: dict = Depends(get_current_user)):
 @app.get("/api/export/in-progress-tickets")
 async def export_in_progress_tickets(current_user: dict = Depends(get_current_user)):
     columns = _get_ticket_columns()
-    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'in_progress' ORDER BY timestamp DESC")
+    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'in_progress' AND (remediation_status IS NULL OR remediation_status != 'applied_not_solved') ORDER BY timestamp DESC")
 
     output = StringIO()
     if rows:
@@ -3769,7 +4335,7 @@ async def slack_interactions(request: Request):
                 # Get ticket details
                 ticket = db_query("SELECT * FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
                 if not ticket:
-                    return JSONResponse({"text": f"❌ Ticket {ticket_id} not found"})
+                    return JSONResponse({"text": f"Ticket {ticket_id} not found"})
 
                 # Update ticket status
                 db_execute("""UPDATE tickets
@@ -3819,12 +4385,12 @@ async def slack_interactions(request: Request):
                                  pipeline=pipeline_name, run_id=original_run_id, user_name=user_name,
                                  details="job_id required for Databricks remediation but not found in ticket data")
                         return JSONResponse({
-                            "text": f"❌ Cannot trigger remediation for {ticket_id}",
+                            "text": f"Cannot trigger remediation for {ticket_id}",
                             "blocks": [{
                                 "type": "section",
                                 "text": {
                                     "type": "mrkdwn",
-                                    "text": f"❌ *Remediation blocked*\n\nTicket: `{ticket_id}`\nReason: job_id is required but was not found in ticket data.\nPlease manually trigger the job or contact support."
+                                    "text": f"*Remediation blocked*\n\nTicket: `{ticket_id}`\nReason: job_id is required but was not found in ticket data.\nPlease manually trigger the job or contact support."
                                 }
                             }],
                             "replace_original": True
@@ -3877,7 +4443,7 @@ async def slack_interactions(request: Request):
             # Get ticket details
             ticket = db_query("SELECT * FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
             if not ticket:
-                return JSONResponse({"text": f"❌ Ticket {ticket_id} not found"})
+                return JSONResponse({"text": f"Ticket {ticket_id} not found"})
 
             # Update ticket status
             db_execute("""UPDATE tickets
@@ -3897,13 +4463,13 @@ async def slack_interactions(request: Request):
 
             # Update Slack message
             response_message = {
-                "text": f"❌ Auto-remediation rejected by {user_name}",
+                "text": f"Auto-remediation rejected by {user_name}",
                 "blocks": [
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"❌ *Auto-remediation rejected by {user_name}*\n\nTicket: `{ticket_id}` requires manual intervention.\nPipeline: `{ticket.get('pipeline')}`"
+                            "text": f"*Auto-remediation rejected by {user_name}*\n\nTicket: `{ticket_id}` requires manual intervention.\nPipeline: `{ticket.get('pipeline')}`"
                         }
                     }
                 ],
@@ -3917,7 +4483,7 @@ async def slack_interactions(request: Request):
 
     except Exception as e:
         logger.exception(f"[SLACK-INTERACTION] Error processing interaction: {e}")
-        return JSONResponse({"text": f"❌ Error: {str(e)}"}, status_code=500)
+        return JSONResponse({"text": f"Error: {str(e)}"}, status_code=500)
 
 # --- WebSocket ---
 @app.websocket("/ws")
