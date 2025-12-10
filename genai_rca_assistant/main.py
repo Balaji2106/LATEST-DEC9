@@ -1205,6 +1205,15 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 # --- Slack helpers ---
+def get_display_status(rca_status: str) -> str:
+    """Map RCA status to display status for Slack messages"""
+    status_map = {
+        "open": "OPEN",
+        "in_progress": "IN PROGRESS",
+        "acknowledged": "CLOSED"
+    }
+    return status_map.get(rca_status, "UNKNOWN")
+
 def post_slack_notification(ticket_id: str, essentials: dict, rca: dict, itsm_ticket_id: str = None):
     if not SLACK_BOT_TOKEN: return None
     title = essentials.get("alertRule") or essentials.get("pipelineName") or "ADF Alert"
@@ -1306,6 +1315,10 @@ def update_slack_message_on_reopen(ticket_id: str, reason: str = "Ticket reopene
     severity = row.get("severity", "Medium")
     priority = row.get("priority", derive_priority(severity))
     itsm_ticket_id = row.get("itsm_ticket_id")
+    current_status = row.get("status", "open")
+
+    # Get display status based on current RCA status
+    display_status = get_display_status(current_status)
 
     try:
         recs = json.loads(row.get("recommendations", "[]"))
@@ -1316,7 +1329,7 @@ def update_slack_message_on_reopen(ticket_id: str, reason: str = "Ticket reopene
 
     blocks = [
         {"type":"header","text":{"type":"plain_text","text":f"REOPENED: {title} - {severity} ({priority})"}},
-        {"type":"section", "text": {"type":"mrkdwn", "text": f"*Ticket:* `{ticket_id}`{itsm_info}\n*Run ID:* `{run_id}`\n*Status:* `OPEN`"}},
+        {"type":"section", "text": {"type":"mrkdwn", "text": f"*Ticket:* `{ticket_id}`{itsm_info}\n*Run ID:* `{run_id}`\n*Status:* `{display_status}`"}},
         {"type":"context", "elements": [{"type": "mrkdwn", "text": f"{reason} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"}]},
         {"type":"divider"},
         {"type":"section", "text": {"type":"mrkdwn", "text": f"*Root Cause:* {root}\n*Confidence:* {confidence}\n*Error Type:* `{error_type}`"}},
@@ -1346,6 +1359,73 @@ def update_slack_message_on_reopen(ticket_id: str, reason: str = "Ticket reopene
             logger.warning("Slack update failed: %s %s", r.status_code, r.text)
         else:
             logger.info(f"Slack message updated for reopened ticket {ticket_id}")
+    except Exception as e:
+        logger.warning("Slack update post exception: %s", e)
+
+def update_slack_message_on_status_change(ticket_id: str, reason: str = "Status updated"):
+    """Updates Slack message when ticket status changes (for in_progress, etc.)"""
+    if not SLACK_BOT_TOKEN: return
+    row = db_query("SELECT * FROM tickets WHERE id=:id", {"id": ticket_id}, one=True)
+    if not (row and row.get("slack_ts") and row.get("slack_channel")):
+        logger.warning("Cannot update Slack message: Missing slack_ts or channel for %s", ticket_id)
+        return
+
+    title = row.get("pipeline", "ADF Alert")
+    run_id = row.get("run_id", "N/A")
+    root = row.get("rca_result", "N/A")
+    confidence = row.get("confidence", "Low")
+    error_type = row.get("error_type", "N/A")
+    severity = row.get("severity", "Medium")
+    priority = row.get("priority", derive_priority(severity))
+    itsm_ticket_id = row.get("itsm_ticket_id")
+    current_status = row.get("status", "open")
+
+    # Get display status based on current RCA status
+    display_status = get_display_status(current_status)
+
+    try:
+        recs = json.loads(row.get("recommendations", "[]"))
+    except Exception:
+        recs = []
+
+    itsm_info = f"\n*ITSM Ticket:* `{itsm_ticket_id}`" if itsm_ticket_id else ""
+
+    blocks = [
+        {"type":"header","text":{"type":"plain_text","text":f"{title} - {severity} ({priority})"}},
+        {"type":"section", "text": {"type":"mrkdwn", "text": f"*Ticket:* `{ticket_id}`{itsm_info}\n*Run ID:* `{run_id}`\n*Status:* `{display_status}`"}},
+        {"type":"context", "elements": [{"type": "mrkdwn", "text": f"{reason} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"}]},
+        {"type":"divider"},
+        {"type":"section", "text": {"type":"mrkdwn", "text": f"*Root Cause:* {root}\n*Confidence:* {confidence}\n*Error Type:* `{error_type}`"}},
+    ]
+
+    if recs:
+        rec_text = "\n".join([f"* {r}" for r in recs])
+        blocks.append({"type":"section", "text": {"type":"mrkdwn", "text": f"*Resolution Steps:*\n{rec_text}"}})
+
+    dash_url = f"{PUBLIC_BASE_URL.rstrip('/')}/dashboard"
+
+    # Choose button style based on status
+    button_style = "primary" if current_status == "in_progress" else "danger"
+
+    blocks.append({
+        "type":"actions",
+        "elements":[{"type":"button","text":{"type":"plain_text","text":"Open in Dashboard"},"url":dash_url, "style": button_style}]
+    })
+
+    payload = {
+        "channel": row["slack_channel"],
+        "ts": row["slack_ts"],
+        "blocks": blocks,
+        "text": f"Ticket {ticket_id}: {title} - {display_status}"
+    }
+    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
+
+    try:
+        r = requests.post("https://slack.com/api/chat.update", headers=headers, json=payload, timeout=10)
+        if r.status_code != 200:
+            logger.warning("Slack update failed: %s %s", r.status_code, r.text)
+        else:
+            logger.info(f"Slack message updated for ticket {ticket_id} status change to {current_status}")
     except Exception as e:
         logger.warning("Slack update post exception: %s", e)
 
@@ -3925,6 +4005,9 @@ async def jira_webhook(request: Request):
             elif new_rca_status == "in_progress" and old_status not in ["acknowledged", "in_progress"]:
                 # Moved to in-progress from open
                 logger.info(f"Ticket {ticket_id} moved to in_progress via JIRA")
+
+                # Update Slack message with new status
+                update_slack_message_on_status_change(ticket_id, f"JIRA status changed to {new_jira_status}")
 
                 # Log audit trail
                 log_audit(
