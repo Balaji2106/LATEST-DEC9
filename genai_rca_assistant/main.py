@@ -3494,7 +3494,7 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
         id=tid,
         timestamp=timestamp,
         pipeline=job_name,
-        run_id=run_id or "N/A",
+        run_id=run_id if run_id else tid,  # Use ticket_id if run_id is not provided to ensure uniqueness
         rca_result=rca.get("root_cause"),
         recommendations=json.dumps(rca.get("recommendations") or []),
         confidence=rca.get("confidence"),
@@ -3557,7 +3557,7 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
         ticket_id=tid,
         action="Ticket Created",
         pipeline=job_name,
-        run_id=run_id or "N/A",
+        run_id=run_id if run_id else tid,  # Match the ticket's run_id for consistency
         rca_summary=rca.get("root_cause", "")[:150],
         details=f"Source={'Cluster' if is_cluster_failure else 'Job'} Failure. Blob URL: {blob_url or 'Not uploaded'}",
         finops_team=finops_tags["team"],
