@@ -3485,7 +3485,8 @@ async def airflow_monitor(request: Request):
     # ------------------------------------------
     # STEP 7: Create ticket
     # ------------------------------------------
-    ticket_id = str(uuid.uuid4())
+    # Generate Airflow ticket ID with ARF prefix (same format as ADF/DBX)
+    ticket_id = f"ARF-{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
     timestamp_iso = datetime.now(timezone.utc).isoformat()
 
     # Extract finops tags (if any)
@@ -3521,9 +3522,9 @@ async def airflow_monitor(request: Request):
         "priority": "P2" if severity == "High" else "P3",
         "error_type": error_type,
         "affected_entity": json.dumps(affected_entity),
-        "status": "Open",
+        "status": "open",  # lowercase to match dashboard queries
         "sla_seconds": 14400,  # 4 hours default SLA
-        "sla_status": "within_sla",
+        "sla_status": "Pending",  # Match Databricks format
         "finops_team": finops_tags.get("finops_team"),
         "finops_owner": finops_tags.get("finops_owner"),
         "finops_cost_center": finops_tags.get("finops_cost_center"),
