@@ -3846,31 +3846,52 @@ async def airflow_monitor(request: Request):
     # -----------------------
     # JIRA TICKET CREATION
     # -----------------------
+    itsm_ticket_id = None
     if ITSM_TOOL == "jira":
         try:
-            itsm_id = await asyncio.to_thread(create_jira_ticket, ticket_id, pipeline_name, rca, finops_tags, run_id)
-            if itsm_id:
+            itsm_ticket_id = await asyncio.to_thread(create_jira_ticket, ticket_id, pipeline_name, rca, finops_tags, run_id)
+            if itsm_ticket_id:
                 db_execute("UPDATE tickets SET itsm_ticket_id = :id WHERE id = :tid",
-                           {"id": itsm_id, "tid": ticket_id})
+                           {"id": itsm_ticket_id, "tid": ticket_id})
+                logger.info(f"Successfully created Jira ticket: {itsm_ticket_id}")
+                log_audit(
+                    ticket_id=ticket_id,
+                    action="Jira Ticket Created",
+                    pipeline=pipeline_name,
+                    run_id=run_id if run_id else ticket_id,
+                    details=f"JIRA ticket {itsm_ticket_id} created for Airflow failure",
+                    itsm_ticket_id=itsm_ticket_id
+                )
         except Exception as e:
-            logger.error(f"Jira error: {e}")
-
-    # -----------------------
-    # BROADCAST WEBSOCKET
-    # -----------------------
-    try:
-        await manager.broadcast({"event": "new_ticket", "ticket_id": ticket_id})
-    except:
-        pass
+            logger.error(f"Failed to create Jira ticket for Airflow failure: {e}", exc_info=True)
 
     # -----------------------
     # SLACK NOTIFICATION
     # -----------------------
     try:
         essentials = {"alertRule": pipeline_name, "runId": run_id, "pipelineName": pipeline_name}
-        post_slack_notification(ticket_id, essentials, rca, None)
-    except:
-        pass
+        slack_result = post_slack_notification(ticket_id, essentials, rca, itsm_ticket_id)
+        if slack_result:
+            logger.info(f"Slack notification sent for Airflow ticket {ticket_id}")
+            log_audit(
+                ticket_id=ticket_id,
+                action="Slack Notification Sent",
+                pipeline=pipeline_name,
+                run_id=run_id if run_id else ticket_id,
+                details="Slack alert posted successfully"
+            )
+        else:
+            logger.warning(f"Slack notification failed for Airflow ticket {ticket_id}")
+    except Exception as e:
+        logger.error(f"Failed to send Slack notification for Airflow failure: {e}", exc_info=True)
+
+    # -----------------------
+    # BROADCAST WEBSOCKET
+    # -----------------------
+    try:
+        await manager.broadcast({"event": "new_ticket", "ticket_id": ticket_id})
+    except Exception as e:
+        logger.warning(f"WebSocket broadcast failed: {e}")
 
     logger.info("=" * 120)
     logger.info(f"✅ AIRFLOW TICKET PROCESSING COMPLETE: {ticket_id}")
