@@ -3495,6 +3495,19 @@ async def airflow_monitor(request: Request):
     error_type = error_classification.get('error_type', 'Unknown') if error_classification else 'UnknownAirflowError'
     severity = 'High' if error_classification and error_classification.get('is_remediable') else 'Medium'
 
+    # Build affected_entity with Airflow metadata (similar to cluster metadata)
+    affected_entity = {
+        "dag_id": dag_id,
+        "task_id": task_id,
+        "execution_date": metadata.get('execution_date'),
+        "try_number": metadata.get('try_number'),
+        "max_tries": metadata.get('max_tries'),
+        "operator": metadata.get('operator'),
+        "log_url": metadata.get('log_url'),
+        "airflow_base_url": metadata.get('airflow_base_url'),
+        "error_classification": error_classification
+    }
+
     # Prepare ticket data
     ticket_data = {
         "id": ticket_id,
@@ -3507,37 +3520,30 @@ async def airflow_monitor(request: Request):
         "severity": severity,
         "priority": "P2" if severity == "High" else "P3",
         "error_type": error_type,
-        "affected_entity": dag_id,
+        "affected_entity": json.dumps(affected_entity),
         "status": "Open",
+        "sla_seconds": 14400,  # 4 hours default SLA
+        "sla_status": "within_sla",
         "finops_team": finops_tags.get("finops_team"),
         "finops_owner": finops_tags.get("finops_owner"),
         "finops_cost_center": finops_tags.get("finops_cost_center"),
         "processing_mode": "airflow"
     }
 
-    db_insert("tickets", ticket_data)
+    # Insert ticket using db_execute
+    db_execute("""
+        INSERT INTO tickets (
+            id, timestamp, pipeline, run_id, rca_result, recommendations, confidence,
+            severity, priority, error_type, affected_entity, status, sla_seconds, sla_status,
+            finops_team, finops_owner, finops_cost_center, processing_mode
+        ) VALUES (
+            :id, :timestamp, :pipeline, :run_id, :rca_result, :recommendations, :confidence,
+            :severity, :priority, :error_type, :affected_entity, :status, :sla_seconds, :sla_status,
+            :finops_team, :finops_owner, :finops_cost_center, :processing_mode
+        )
+    """, ticket_data)
+
     logger.info(f"✅ Ticket created: {ticket_id}")
-
-    # Store Airflow metadata in tickets_metadata
-    airflow_metadata = {
-        "ticket_id": ticket_id,
-        "dag_id": dag_id,
-        "task_id": task_id,
-        "execution_date": metadata.get('execution_date'),
-        "try_number": metadata.get('try_number'),
-        "max_tries": metadata.get('max_tries'),
-        "operator": metadata.get('operator'),
-        "log_url": metadata.get('log_url'),
-        "airflow_base_url": metadata.get('airflow_base_url'),
-        "error_classification": json.dumps(error_classification) if error_classification else None,
-        "webhook_payload": json.dumps(body)
-    }
-
-    try:
-        db_insert("tickets_metadata", airflow_metadata)
-        logger.info(f"✅ Airflow metadata stored for ticket {ticket_id}")
-    except Exception as e:
-        logger.warning(f"Failed to store Airflow metadata: {e}")
 
     # ------------------------------------------
     # STEP 8: Send Slack notification
