@@ -3525,9 +3525,9 @@ async def airflow_monitor(request: Request):
         "status": "open",  # lowercase to match dashboard queries
         "sla_seconds": 14400,  # 4 hours default SLA
         "sla_status": "Pending",  # Match Databricks format
-        "finops_team": finops_tags.get("finops_team"),
-        "finops_owner": finops_tags.get("finops_owner"),
-        "finops_cost_center": finops_tags.get("finops_cost_center"),
+        "finops_team": finops_tags.get("team"),  # Extract team from finops_tags
+        "finops_owner": finops_tags.get("owner"),  # Extract owner email
+        "finops_cost_center": finops_tags.get("cost_center"),  # Extract cost center
         "processing_mode": "airflow-arf"
     }
 
