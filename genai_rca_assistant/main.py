@@ -1220,6 +1220,65 @@ def update_slack_message_on_ack(ticket_id: str, user_name: str):
     except Exception as e:
         logger.warning("Slack update post exception: %s", e)
 
+def update_slack_message_on_reopen(ticket_id: str, reason: str = "Ticket reopened"):
+    """Updates Slack message when ticket is reopened"""
+    if not SLACK_BOT_TOKEN: return
+    row = db_query("SELECT * FROM tickets WHERE id=:id", {"id": ticket_id}, one=True)
+    if not (row and row.get("slack_ts") and row.get("slack_channel")):
+        logger.warning("Cannot update Slack message: Missing slack_ts or channel for %s", ticket_id)
+        return
+
+    title = row.get("pipeline", "ADF Alert")
+    run_id = row.get("run_id", "N/A")
+    root = row.get("rca_result", "N/A")
+    confidence = row.get("confidence", "Low")
+    error_type = row.get("error_type", "N/A")
+    severity = row.get("severity", "Medium")
+    priority = row.get("priority", derive_priority(severity))
+    itsm_ticket_id = row.get("itsm_ticket_id")
+
+    try:
+        recs = json.loads(row.get("recommendations", "[]"))
+    except Exception:
+        recs = []
+
+    itsm_info = f"\n*ITSM Ticket:* `{itsm_ticket_id}`" if itsm_ticket_id else ""
+
+    blocks = [
+        {"type":"header","text":{"type":"plain_text","text":f"🔄 REOPENED: {title} - {severity} ({priority})"}},
+        {"type":"section", "text": {"type":"mrkdwn", "text": f"*Ticket:* `{ticket_id}`{itsm_info}\n*Run ID:* `{run_id}`\n*Status:* `OPEN`"}},
+        {"type":"context", "elements": [{"type": "mrkdwn", "text": f"⚠️ {reason} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"}]},
+        {"type":"divider"},
+        {"type":"section", "text": {"type":"mrkdwn", "text": f"*Root Cause:* {root}\n*Confidence:* {confidence}\n*Error Type:* `{error_type}`"}},
+    ]
+
+    if recs:
+        rec_text = "\n".join([f"* {r}" for r in recs])
+        blocks.append({"type":"section", "text": {"type":"mrkdwn", "text": f"*Resolution Steps:*\n{rec_text}"}})
+
+    dash_url = f"{PUBLIC_BASE_URL.rstrip('/')}/dashboard"
+    blocks.append({
+        "type":"actions",
+        "elements":[{"type":"button","text":{"type":"plain_text","text":"Open in Dashboard"},"url":dash_url, "style": "danger"}]
+    })
+
+    payload = {
+        "channel": row["slack_channel"],
+        "ts": row["slack_ts"],
+        "blocks": blocks,
+        "text": f"🔄 Ticket {ticket_id}: {title} - REOPENED"
+    }
+    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
+
+    try:
+        r = requests.post("https://slack.com/api/chat.update", headers=headers, json=payload, timeout=10)
+        if r.status_code != 200:
+            logger.warning("Slack update failed: %s %s", r.status_code, r.text)
+        else:
+            logger.info(f"Slack message updated for reopened ticket {ticket_id}")
+    except Exception as e:
+        logger.warning("Slack update post exception: %s", e)
+
 # --- Helper: resilient POST (for Logic App 502s) ---
 def _http_post_with_retries(url: str, payload: dict, timeout: int = 60, retries: int = 3, backoff: float = 1.5):
     last = None
@@ -3659,6 +3718,161 @@ async def airflow_monitor(request: Request):
         "task_id": task_id,
         "run_id": run_id
     }
+
+@app.post("/jira-webhook")
+async def jira_webhook(request: Request):
+    """
+    JIRA webhook endpoint to handle status changes and sync back to RCA system
+    Configure in JIRA: Project Settings -> Webhooks -> Add webhook
+    URL: https://your-domain/jira-webhook
+    Events: Issue Updated
+    """
+    try:
+        body = await request.json()
+        logger.info(f"📥 JIRA webhook received: {json.dumps(body, indent=2)}")
+
+        # Extract webhook event details
+        webhook_event = body.get("webhookEvent")
+        issue = body.get("issue", {})
+        changelog = body.get("changelog", {})
+
+        if webhook_event != "jira:issue_updated":
+            logger.info(f"Ignoring JIRA webhook event: {webhook_event}")
+            return {"status": "ignored", "reason": "Not an issue update event"}
+
+        # Get JIRA issue key
+        jira_key = issue.get("key")
+        if not jira_key:
+            logger.warning("JIRA webhook missing issue key")
+            return {"status": "error", "message": "Missing issue key"}
+
+        # Find ticket by JIRA ID
+        ticket = db_query("SELECT id, status, pipeline FROM tickets WHERE itsm_ticket_id = :jira_key",
+                         {"jira_key": jira_key}, one=True)
+
+        if not ticket:
+            logger.info(f"No ticket found for JIRA key {jira_key}")
+            return {"status": "ignored", "reason": "Ticket not found in RCA system"}
+
+        ticket_id = ticket["id"]
+        old_status = ticket["status"]
+
+        # Check for status changes in changelog
+        status_changed = False
+        new_jira_status = None
+
+        for item in changelog.get("items", []):
+            if item.get("field") == "status":
+                new_jira_status = item.get("toString", "").lower()
+                old_jira_status = item.get("fromString", "").lower()
+                status_changed = True
+                logger.info(f"JIRA status change detected: {old_jira_status} -> {new_jira_status}")
+                break
+
+        if not status_changed:
+            logger.info("No status change in JIRA webhook")
+            return {"status": "ignored", "reason": "No status change"}
+
+        # Map JIRA status to RCA system status
+        # JIRA "Done/Resolved/Closed" -> RCA "acknowledged"
+        # JIRA "In Progress/Selected for Development/In Review" -> RCA "in_progress"
+        # JIRA "To Do/Open/Backlog/Reopened" -> RCA "open"
+
+        new_rca_status = old_status  # default to current
+
+        if new_jira_status in ["done", "resolved", "closed"]:
+            new_rca_status = "acknowledged"
+        elif new_jira_status in ["in progress", "selected for development", "in review"]:
+            new_rca_status = "in_progress"
+        elif new_jira_status in ["to do", "open", "backlog", "reopened"]:
+            new_rca_status = "open"
+
+        # Update ticket status if changed
+        if new_rca_status != old_status:
+            logger.info(f"Updating ticket {ticket_id} status: {old_status} -> {new_rca_status}")
+
+            db_execute("""UPDATE tickets
+                         SET status = :new_status
+                         WHERE id = :ticket_id""",
+                      {"new_status": new_rca_status, "ticket_id": ticket_id})
+
+            # Send Slack notification based on status change
+            if new_rca_status == "open" and old_status == "acknowledged":
+                # Ticket was closed and now reopened
+                update_slack_message_on_reopen(ticket_id, f"JIRA status changed to {new_jira_status}")
+
+                # Log audit trail
+                log_audit(
+                    ticket_id=ticket_id,
+                    action="Ticket Reopened",
+                    pipeline=ticket["pipeline"],
+                    details=f"Ticket reopened via JIRA status change to {new_jira_status}",
+                    itsm_ticket_id=jira_key
+                )
+            elif new_rca_status == "acknowledged" and old_status != "acknowledged":
+                # Ticket was closed via JIRA
+                update_slack_message_on_ack(ticket_id, "JIRA System")
+
+                # Calculate MTTR
+                created = db_query("SELECT timestamp FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
+                if created:
+                    created_time = datetime.fromisoformat(created["timestamp"])
+                    ack_time = datetime.utcnow()
+                    ack_seconds = int((ack_time - created_time).total_seconds())
+
+                    db_execute("""UPDATE tickets
+                                 SET ack_ts = :ack_ts, ack_seconds = :ack_seconds,
+                                     ack_user = :ack_user, ack_empid = :ack_empid
+                                 WHERE id = :id""",
+                              {"ack_ts": ack_time.isoformat(), "ack_seconds": ack_seconds,
+                               "ack_user": "JIRA System", "ack_empid": "AUTO", "id": ticket_id})
+
+                # Log audit trail
+                log_audit(
+                    ticket_id=ticket_id,
+                    action="Ticket Closed",
+                    pipeline=ticket["pipeline"],
+                    details=f"Ticket closed via JIRA status change to {new_jira_status}",
+                    itsm_ticket_id=jira_key,
+                    user_name="JIRA System",
+                    user_empid="AUTO"
+                )
+            elif new_rca_status == "in_progress":
+                # Send Slack update for in-progress status
+                logger.info(f"Ticket {ticket_id} moved to in_progress via JIRA")
+
+                # Log audit trail
+                log_audit(
+                    ticket_id=ticket_id,
+                    action="Status Updated",
+                    pipeline=ticket["pipeline"],
+                    details=f"Ticket status changed to in_progress via JIRA status {new_jira_status}",
+                    itsm_ticket_id=jira_key
+                )
+
+            # Broadcast status change to WebSocket clients
+            await manager.broadcast({
+                "event": "status_update",
+                "ticket_id": ticket_id,
+                "old_status": old_status,
+                "new_status": new_rca_status,
+                "source": "jira_webhook"
+            })
+
+            return {
+                "status": "success",
+                "ticket_id": ticket_id,
+                "old_status": old_status,
+                "new_status": new_rca_status,
+                "jira_status": new_jira_status
+            }
+        else:
+            logger.info(f"JIRA status {new_jira_status} maps to same RCA status {old_status}, no update needed")
+            return {"status": "no_change", "message": "Status already matches"}
+
+    except Exception as e:
+        logger.error(f"❌ Error processing JIRA webhook: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
 
 ###########################################################################################################################
 
