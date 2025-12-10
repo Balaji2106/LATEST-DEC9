@@ -3426,7 +3426,7 @@ async def airflow_monitor(request: Request):
     # Check if we already have a ticket for this run_id
     if run_id:
         existing = db_query(
-            "SELECT id, status FROM tickets WHERE run_id = :run_id AND processing_mode = 'airflow'",
+            "SELECT id, status FROM tickets WHERE run_id = :run_id AND processing_mode = 'airflow-arf'",
             {"run_id": run_id},
             one=True
         )
@@ -3444,7 +3444,7 @@ async def airflow_monitor(request: Request):
     recent_ticket = db_query(
         '''SELECT id, status, timestamp FROM tickets
            WHERE pipeline = :pipeline_name
-           AND processing_mode = 'airflow'
+           AND processing_mode = 'airflow-arf'
            AND timestamp > :cutoff
            ORDER BY timestamp DESC
            LIMIT 1''',
@@ -3527,7 +3527,7 @@ async def airflow_monitor(request: Request):
         "finops_team": finops_tags.get("finops_team"),
         "finops_owner": finops_tags.get("finops_owner"),
         "finops_cost_center": finops_tags.get("finops_cost_center"),
-        "processing_mode": "airflow"
+        "processing_mode": "airflow-arf"
     }
 
     # Insert ticket using db_execute
@@ -3543,35 +3543,50 @@ async def airflow_monitor(request: Request):
         )
     """, ticket_data)
 
-    logger.info(f"✅ Ticket created: {ticket_id}")
+    logger.info(f"🎫 Ticket created: {ticket_id}")
 
-    # ------------------------------------------
-    # STEP 8: Send Slack notification
-    # ------------------------------------------
-    if SLACK_BOT_TOKEN:
-        try:
-            await send_slack_alert(
-                ticket_id=ticket_id,
-                pipeline=pipeline_name,
-                error_msg=error_message[:500],
-                rca_summary=rca.get("rca", "")[:300],
-                severity=severity,
-                run_id=run_id,
-                source="airflow"
-            )
-        except Exception as e:
-            logger.error(f"Failed to send Slack alert: {e}")
-
-    # ------------------------------------------
-    # STEP 9: Log audit trail
-    # ------------------------------------------
+    # -----------------------
+    # AUDIT LOG
+    # -----------------------
     log_audit(
         ticket_id=ticket_id,
-        action="airflow_failure_received",
+        action="Ticket Created",
         pipeline=pipeline_name,
         run_id=run_id or "N/A",
-        details=f"Airflow DAG={dag_id}, Task={task_id}, Error={error_type}"
+        rca_summary=rca.get("root_cause", "")[:150],
+        details=f"Source=Airflow DAG Failure. DAG={dag_id}, Task={task_id}",
+        finops_team=finops_tags.get("team"),
+        finops_owner=finops_tags.get("owner")
     )
+
+    # -----------------------
+    # JIRA TICKET CREATION
+    # -----------------------
+    if ITSM_TOOL == "jira":
+        try:
+            itsm_id = await asyncio.to_thread(create_jira_ticket, ticket_id, pipeline_name, rca, finops_tags, run_id)
+            if itsm_id:
+                db_execute("UPDATE tickets SET itsm_ticket_id = :id WHERE id = :tid",
+                           {"id": itsm_id, "tid": ticket_id})
+        except Exception as e:
+            logger.error(f"Jira error: {e}")
+
+    # -----------------------
+    # BROADCAST WEBSOCKET
+    # -----------------------
+    try:
+        await manager.broadcast({"event": "new_ticket", "ticket_id": ticket_id})
+    except:
+        pass
+
+    # -----------------------
+    # SLACK NOTIFICATION
+    # -----------------------
+    try:
+        essentials = {"alertRule": pipeline_name, "runId": run_id, "pipelineName": pipeline_name}
+        post_slack_notification(ticket_id, essentials, rca, None)
+    except:
+        pass
 
     logger.info("=" * 120)
     logger.info(f"✅ AIRFLOW TICKET PROCESSING COMPLETE: {ticket_id}")
