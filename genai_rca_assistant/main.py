@@ -964,27 +964,68 @@ def derive_priority(sev):
 def sla_for_priority(p):
     return {"P1":900,"P2":1800,"P3":7200,"P4":86400}.get(p,1800)
 
-def fallback_rca(desc: str, source_type: str = "adf"):
-    """Fallback RCA when AI fails"""
-    service_name = "Databricks job/cluster" if source_type == "databricks" else "ADF pipeline"
+def fallback_rca(desc: str, source_type: str = "adf", error_classification: dict = None):
+    """Fallback RCA when AI fails - now handles ADF, Databricks, and Airflow"""
+
+    # Determine service name based on source type
+    if source_type == "databricks":
+        service_name = "Databricks job/cluster"
+    elif source_type == "airflow":
+        service_name = "Airflow DAG/task"
+    else:  # adf or any other
+        service_name = "ADF pipeline"
+
+    # Use classified error if available, otherwise use generic error
+    if error_classification:
+        error_type = error_classification.get('error_type', 'UnknownError')
+        severity = 'High' if error_classification.get('is_remediable') else 'Medium'
+        is_remediable = error_classification.get('is_remediable', False)
+        remediation_action = error_classification.get('action', 'manual_intervention')
+        category = error_classification.get('category', 'Unknown')
+
+        root_cause = f"{service_name} failed with {error_type} ({category}). "
+        if 'typical_cause' in error_classification:
+            root_cause += error_classification['typical_cause']
+        else:
+            root_cause += "Unable to determine detailed root cause from AI analysis."
+
+        recommendations = [
+            f"Inspect {source_type.upper()} logs for detailed error context.",
+            "Check resource health, configurations, and dependencies.",
+        ]
+
+        if is_remediable:
+            recommendations.insert(0, f"Error appears remediable. Suggested action: {remediation_action}")
+    else:
+        # No classification available - fully generic fallback
+        error_type = "UnknownError"
+        severity = "Medium"
+        is_remediable = False
+        remediation_action = "manual_intervention"
+        root_cause = f"{service_name} failed. Unable to determine root cause from logs."
+        recommendations = [
+            f"Inspect {source_type.upper()} logs for more context.",
+            "Check resource health and configurations."
+        ]
+
     return {
-        "root_cause": f"{service_name} failed. Unable to determine root cause from logs.",
-        "error_type": "UnknownError",
+        "root_cause": root_cause,
+        "error_type": error_type,
         "affected_entity": None,
-        "severity": "Medium",
-        "priority": "P3",
-        "confidence": "Low",
-        "recommendations": [f"Inspect {source_type.upper()} logs for more context.", "Check resource health and configurations."],
+        "severity": severity,
+        "priority": "P2" if severity == "High" else "P3",
+        "confidence": "Medium" if error_classification else "Low",
+        "recommendations": recommendations,
         "auto_heal_possible": False,
-        "is_auto_remediable": False,
-        "remediation_action": "manual_intervention",
-        "remediation_risk": "High",
+        "is_auto_remediable": is_remediable,
+        "remediation_action": remediation_action,
+        "remediation_risk": "Medium" if is_remediable else "High",
         "requires_human_approval": True,
         "business_impact": "Medium",
-        "estimated_resolution_time_minutes": 30
+        "estimated_resolution_time_minutes": 15 if is_remediable else 30
     }
 
-def generate_rca_and_recs(desc, source_type="adf"):
+def generate_rca_and_recs(desc, source_type="adf", error_classification=None):
     """
     Generate RCA using configured AI provider(s)
     AI_PROVIDER options: 'gemini', 'ollama', 'auto'
@@ -1045,8 +1086,8 @@ def generate_rca_and_recs(desc, source_type="adf"):
             logger.info("Gemini RCA successful for %s", source_type.upper())
             return ai
 
-    # All AI attempts failed, use static fallback
-    return fallback_rca(desc, source_type)
+    # All AI attempts failed, use static fallback with error classification
+    return fallback_rca(desc, source_type, error_classification)
 
 # --- ITSM Integration Functions ---
 def _get_jira_auth() -> Optional[HTTPBasicAuth]:
@@ -3477,10 +3518,10 @@ async def airflow_monitor(request: Request):
     enriched_context = build_airflow_context_for_rca(body, error_classification)
 
     # ------------------------------------------
-    # STEP 6: Generate RCA using Gemini
+    # STEP 6: Generate RCA using Gemini (with error classification for fallback)
     # ------------------------------------------
     logger.info("🧠 Generating RCA for Airflow failure...")
-    rca = generate_rca_and_recs(enriched_context, source_type="airflow")
+    rca = generate_rca_and_recs(enriched_context, source_type="airflow", error_classification=error_classification)
 
     # ------------------------------------------
     # STEP 7: Create ticket
