@@ -29,6 +29,8 @@ data/
 # Backup files
 backup/
 dashboard-backup.txt
+*.orig
+*.rej
 
 # Logs
 *.log
@@ -41,6 +43,22 @@ log/
 
 # Docker
 *.tar
+
+# ===========================================
+# AIRFLOW SPECIFIC
+# ===========================================
+
+# Airflow database and runtime files
+airflow/airflow/airflow.db
+airflow/airflow/airflow.db-shm
+airflow/airflow/airflow.db-wal
+airflow/airflow/logs/
+airflow/airflow/airflow-webserver.pid
+airflow/airflow/airflow-scheduler.pid
+airflow/airflow/webserver_config.py
+
+# Airflow configuration (may contain secrets)
+airflow/airflow/airflow.cfg
 
 # ===========================================
 # IDE / OS FILES
