@@ -24,12 +24,12 @@
   .card{background:#0f1720;border:1px solid #222426;border-radius:8px;padding:14px;margin:10px;width:320px;box-shadow:0 4px 18px rgba(0,0,0,0.6);transition:transform 0.2s;overflow:hidden}
   .card:hover{transform:translateY(-3px);box-shadow:0 6px 20px rgba(0,0,0,0.7)}
   .title{display:flex;justify-content:space-between;align-items:center}
-  .badge{padding:4px 8px;border-radius:6px;font-weight:600}
+  .badge{padding:6px 10px;border-radius:6px;font-weight:700;font-size:13px;text-transform:uppercase}
   .sev-critical{background:#c92a2a;color:#fff}
   .sev-high{background:#f85149;color:#fff}
   .sev-medium{background:#d29922;color:#000}
   .sev-low{background:#2ea043;color:#fff}
-  .priority{margin-left:8px;background:#222;color:#fff;padding:3px 6px;border-radius:4px;font-size:12px}
+  .priority{margin-left:8px;background:#1f6feb;color:#fff;padding:5px 10px;border-radius:6px;font-size:13px;font-weight:700}
   .timer{font-size:13px;margin-top:8px}
   .muted{color:#9aa6b2;font-size:13px}
   .small{font-size:13px}
@@ -171,8 +171,9 @@
 <div id="modal">
   <div class="modal-box">
     <h3 id="m-title"></h3>
+    <div style="margin:10px 0" id="m-severity-priority"></div>
     <p class="muted small">
-      Error Type: <span id="m-error-type">N/A</span> 
+      Error Type: <span id="m-error-type">N/A</span>
       Affected Entity: <span id="m-affected-entity">N/A</span>
     </p>
     <div id="m-finops" style="margin:8px 0"></div>
@@ -410,7 +411,9 @@ function render(){
       <div class="card">
         <div class="title">
           <div><strong>${escapeHtml(t.pipeline||'ADF')}</strong><div class="muted small">${escapeHtml(t.id)}</div></div>
-          <div>${badge}</div>
+        </div>
+        <div style="margin:8px 0;display:flex;gap:6px;align-items:center">
+          ${badge}
         </div>
         <p class="small desc">${escapeHtml(snippet)}</p>
         <div class="muted small">Run: ${escapeHtml(t.run_id||'N/A')}  ${new Date(t.timestamp).toLocaleString()}</div>
@@ -452,6 +455,11 @@ async function openModal(id){
   catch(e){fullTicket=basicTicket;}
   selected=fullTicket;
   document.getElementById('m-title').innerText=`${selected.id}  ${selected.pipeline}`;
+
+  // Display severity and priority badges prominently
+  const modalBadge=`<span class="badge ${sevClass(selected.severity)}">${selected.severity||'Medium'}</span><span class="priority">${selected.priority||'P4'}</span>`;
+  document.getElementById('m-severity-priority').innerHTML=modalBadge;
+
   document.getElementById('m-rca').innerText=selected.rca_result||(selected.root_cause||'');
   document.getElementById('m-error-type').innerText=selected.error_type||'N/A';
   document.getElementById('m-affected-entity').innerText=selected.affected_entity||'N/A';
@@ -479,10 +487,10 @@ async function openModal(id){
     const mttr = selected.ack_seconds ? `MTTR: ${Math.round(selected.ack_seconds/60)} min` : '';
     statusTag.className = "closed-tag";
     statusTag.innerText=`Closed by: ${selected.ack_user||'unknown'} (${selected.ack_empid||'N/A'})  ${ackTime}  ${mttr}`;
-    document.getElementById('m-meta').innerText=`Priority: ${selected.priority||'P4'}  Severity: ${selected.severity||'Medium'}  Status: Closed`;
+    document.getElementById('m-meta').innerText=`Status: Closed`;
   } else {
     closedArea.style.display='none';
-    document.getElementById('m-meta').innerText=`Priority: ${selected.priority||'P4'}  Severity: ${selected.severity||'Medium'} Status: Open`;
+    document.getElementById('m-meta').innerText=`Status: Open`;
   }
   
   document.getElementById('modal').style.display='flex';
