@@ -2674,25 +2674,26 @@ async def azure_monitor(request: Request):
     """, {"pipeline": pipeline}, one=True)
 
     if active_remediation:
-        logger.info(f"[WEBHOOK-DEDUP] Active remediation found for pipeline {pipeline}")
-        logger.info(f"[WEBHOOK-DEDUP] Ticket: {active_remediation['id']}, Attempts: {active_remediation.get('remediation_attempts', 0)}")
-        logger.info(f"[WEBHOOK-DEDUP] Webhook run_id: {runid}, Original ticket run_id: {active_remediation.get('run_id')}")
+        logger.debug(f"[WEBHOOK-DEDUP] Active remediation found for pipeline {pipeline}")
+        logger.debug(f"[WEBHOOK-DEDUP] Ticket: {active_remediation['id']}, Attempts: {active_remediation.get('remediation_attempts', 0)}")
+        logger.debug(f"[WEBHOOK-DEDUP] Webhook run_id: {runid}, Original ticket run_id: {active_remediation.get('run_id')}")
 
         # This webhook is likely for a remediation retry failure
         # DO NOT create new ticket - callback will handle it
-        log_audit(
-            ticket_id=active_remediation['id'],
-            action="webhook_ignored_during_remediation",
-            pipeline=pipeline,
-            run_id=runid,
-            details=f"Webhook received during active remediation. Callback will handle retry logic. Remediation attempts: {active_remediation.get('remediation_attempts', 0)}"
-        )
+        # Only log audit trail if this is a different run_id (actual retry), not just duplicate webhook
+        if runid != active_remediation.get('run_id'):
+            log_audit(
+                ticket_id=active_remediation['id'],
+                action="webhook_ignored_during_remediation",
+                pipeline=pipeline,
+                run_id=runid,
+                details=f"Webhook received during active remediation (different run). Callback will handle retry logic. Remediation attempts: {active_remediation.get('remediation_attempts', 0)}"
+            )
 
         return JSONResponse({
             "status": "ignored_during_remediation",
             "ticket_id": active_remediation['id'],
-            "message": "Active remediation in progress - callback will handle retry logic",
-            "remediation_attempts": active_remediation.get('remediation_attempts', 0)
+            "message": "Duplicate webhook ignored - active remediation in progress"
         })
 
     finops_tags = extract_finops_tags(pipeline)
