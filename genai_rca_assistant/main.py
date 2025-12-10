@@ -3718,12 +3718,12 @@ async def airflow_monitor(request: Request):
         "timestamp": timestamp_iso,
         "pipeline": pipeline_name,
         "run_id": run_id,
-        "rca_result": rca.get("rca", "Unable to generate RCA"),
+        "rca_result": rca.get("root_cause", "Unable to generate RCA"),  # Fixed: use 'root_cause' key
         "recommendations": json.dumps(rca.get("recommendations", [])),
         "confidence": rca.get("confidence", 0.0),
         "severity": severity,
         "priority": "P2" if severity == "High" else "P3",
-        "error_type": error_type,
+        "error_type": rca.get("error_type", error_type),  # Use RCA error type if available
         "affected_entity": json.dumps(affected_entity),
         "status": "open",  # lowercase to match dashboard queries
         "sla_seconds": 14400,  # 4 hours default SLA
