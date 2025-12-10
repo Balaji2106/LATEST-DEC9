@@ -1150,6 +1150,76 @@ def create_jira_ticket(ticket_id: str, pipeline: str, rca_data: dict, finops: di
         logger.error(f"Exception while creating Jira ticket: {e}")
         return None
 
+async def update_jira_ticket_status(jira_ticket_id: str, new_status: str, comment: str = None):
+    """Updates JIRA ticket status and optionally adds a comment"""
+    auth = _get_jira_auth()
+    if not (JIRA_DOMAIN and auth):
+        logger.warning("JIRA settings incomplete. Cannot update ticket status.")
+        return False
+
+    try:
+        # Get available transitions for this issue
+        transitions_url = f"{JIRA_DOMAIN}/rest/api/3/issue/{jira_ticket_id}/transitions"
+        r = requests.get(transitions_url, auth=auth, timeout=10)
+
+        if r.status_code != 200:
+            logger.warning(f"Failed to get JIRA transitions: {r.status_code} {r.text}")
+            return False
+
+        transitions = r.json().get("transitions", [])
+
+        # Find transition ID for the desired status
+        transition_id = None
+        for t in transitions:
+            if t.get("to", {}).get("name", "").lower() == new_status.lower():
+                transition_id = t.get("id")
+                break
+
+        if not transition_id:
+            logger.warning(f"No transition found for status '{new_status}' in JIRA ticket {jira_ticket_id}")
+            return False
+
+        # Perform the transition
+        transition_payload = {
+            "transition": {"id": transition_id}
+        }
+
+        r = requests.post(transitions_url, auth=auth, json=transition_payload, timeout=10)
+
+        if r.status_code not in [200, 204]:
+            logger.warning(f"Failed to update JIRA status: {r.status_code} {r.text}")
+            return False
+
+        logger.info(f"Successfully updated JIRA ticket {jira_ticket_id} to status '{new_status}'")
+
+        # Add comment if provided
+        if comment:
+            comment_url = f"{JIRA_DOMAIN}/rest/api/3/issue/{jira_ticket_id}/comment"
+            comment_payload = {
+                "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": comment
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+            requests.post(comment_url, auth=auth, json=comment_payload, timeout=10)
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Exception while updating JIRA ticket status: {e}")
+        return False
+
 # --- FastAPI App ---
 app = FastAPI(title="AIOps RCA Assistant")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -1462,15 +1532,22 @@ async def trigger_auto_remediation(ticket_id: str, pipeline_name: str, error_typ
                       "response": json.dumps(response_data), "ticket_id": ticket_id, "attempt_number": attempt_number})
             logger.info(f"[AUTO-REM] Updated remediation attempt with actual run_id: {remediation_run_id}")
 
-            # Update ticket
+            # Update ticket - set both remediation_status and main status to in_progress
             db_execute('''UPDATE tickets
-                        SET remediation_status = :status,
+                        SET remediation_status = :rem_status,
+                            status = :main_status,
                             remediation_run_id = :run_id,
                             remediation_attempts = :attempts,
                             remediation_last_attempt_at = :last_attempt
                         WHERE id = :id''',
-                     {"status": "in_progress", "run_id": remediation_run_id, "attempts": attempt_number,
-                      "last_attempt": datetime.now(timezone.utc).isoformat(), "id": ticket_id})
+                     {"rem_status": "in_progress", "main_status": "in_progress", "run_id": remediation_run_id,
+                      "attempts": attempt_number, "last_attempt": datetime.now(timezone.utc).isoformat(), "id": ticket_id})
+
+            # Sync status to JIRA
+            ticket_row = db_query("SELECT itsm_ticket_id FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
+            if ticket_row and ticket_row.get("itsm_ticket_id"):
+                await update_jira_ticket_status(ticket_row["itsm_ticket_id"], "In Progress",
+                                               f"Auto-remediation in progress (Attempt {attempt_number})")
 
             # Log audit trail
             log_audit(
@@ -1582,15 +1659,22 @@ async def trigger_databricks_remediation(ticket_id: str, job_name: str, job_id: 
                       "remediation_action": remediation_config["action"], "logic_app_response": json.dumps(response_data),
                       "started_at": datetime.now(timezone.utc).isoformat()})
 
-            # Update ticket
+            # Update ticket - set both remediation_status and main status to in_progress
             db_execute('''UPDATE tickets
-                        SET remediation_status = :status,
+                        SET remediation_status = :rem_status,
+                            status = :main_status,
                             remediation_run_id = :run_id,
                             remediation_attempts = :attempts,
                             remediation_last_attempt_at = :last_attempt
                         WHERE id = :id''',
-                     {"status": "in_progress", "run_id": remediation_run_id, "attempts": attempt_number,
-                      "last_attempt": datetime.now(timezone.utc).isoformat(), "id": ticket_id})
+                     {"rem_status": "in_progress", "main_status": "in_progress", "run_id": remediation_run_id,
+                      "attempts": attempt_number, "last_attempt": datetime.now(timezone.utc).isoformat(), "id": ticket_id})
+
+            # Sync status to JIRA
+            ticket_row = db_query("SELECT itsm_ticket_id FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
+            if ticket_row and ticket_row.get("itsm_ticket_id"):
+                await update_jira_ticket_status(ticket_row["itsm_ticket_id"], "In Progress",
+                                               f"Auto-remediation in progress for Databricks (Attempt {attempt_number})")
 
             # Log audit trail
             log_audit(
@@ -3779,8 +3863,8 @@ async def jira_webhook(request: Request):
                       {"new_status": new_rca_status, "ticket_id": ticket_id})
 
             # Send Slack notification based on status change
-            if new_rca_status == "open" and old_status == "acknowledged":
-                # Ticket was closed and now reopened
+            if old_status == "acknowledged" and new_rca_status != "acknowledged":
+                # Ticket was closed and now reopened (to any non-closed status)
                 update_slack_message_on_reopen(ticket_id, f"JIRA status changed to {new_jira_status}")
 
                 # Log audit trail
@@ -3788,7 +3872,7 @@ async def jira_webhook(request: Request):
                     ticket_id=ticket_id,
                     action="Ticket Reopened",
                     pipeline=ticket["pipeline"],
-                    details=f"Ticket reopened via JIRA status change to {new_jira_status}",
+                    details=f"Ticket reopened via JIRA status change to {new_jira_status} (RCA status: {new_rca_status})",
                     itsm_ticket_id=jira_key
                 )
             elif new_rca_status == "acknowledged" and old_status != "acknowledged":
@@ -3819,8 +3903,8 @@ async def jira_webhook(request: Request):
                     user_name="JIRA System",
                     user_empid="AUTO"
                 )
-            elif new_rca_status == "in_progress":
-                # Send Slack update for in-progress status
+            elif new_rca_status == "in_progress" and old_status not in ["acknowledged", "in_progress"]:
+                # Moved to in-progress from open
                 logger.info(f"Ticket {ticket_id} moved to in_progress via JIRA")
 
                 # Log audit trail
@@ -3881,7 +3965,7 @@ async def get_ticket_details(ticket_id: str, current_user: dict = Depends(get_cu
 @app.get("/api/open-tickets")
 async def api_open_tickets(current_user: dict = Depends(get_current_user)):
     columns = _get_ticket_columns()
-    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'open' ORDER BY timestamp DESC")
+    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'open' AND (remediation_status IS NULL OR remediation_status != 'applied_not_solved') ORDER BY timestamp DESC")
     for r in rows:
         if isinstance(r.get("recommendations"), str):
             try:
@@ -3893,7 +3977,7 @@ async def api_open_tickets(current_user: dict = Depends(get_current_user)):
 @app.get("/api/in-progress-tickets")
 async def api_in_progress_tickets(current_user: dict = Depends(get_current_user)):
     columns = _get_ticket_columns()
-    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'in_progress' ORDER BY timestamp DESC")
+    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'in_progress' AND (remediation_status IS NULL OR remediation_status != 'applied_not_solved') ORDER BY timestamp DESC")
     for r in rows:
         if isinstance(r.get("recommendations"), str):
             try:
@@ -3935,7 +4019,7 @@ async def api_remediation_failed_tickets(current_user: dict = Depends(get_curren
 async def api_summary(current_user: dict = Depends(get_current_user)):
     tickets = db_query("SELECT * FROM tickets")
     total = len(tickets)
-    open_tickets_list = [t for t in tickets if t.get("status") != "acknowledged"]
+    open_tickets_list = [t for t in tickets if t.get("status") != "acknowledged" and t.get("remediation_status") != "applied_not_solved"]
     ack_tickets = [t for t in tickets if t.get("status") == "acknowledged"]
     breached = [t for t in tickets if str(t.get("sla_status", "")).lower() == "breached"]
     ack_times = []
@@ -4019,7 +4103,7 @@ async def api_config():
 @app.get("/api/export/open-tickets")
 async def export_open_tickets(current_user: dict = Depends(get_current_user)):
     columns = _get_ticket_columns()
-    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'open' ORDER BY timestamp DESC")
+    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'open' AND (remediation_status IS NULL OR remediation_status != 'applied_not_solved') ORDER BY timestamp DESC")
 
     output = StringIO()
     if rows:
@@ -4038,7 +4122,7 @@ async def export_open_tickets(current_user: dict = Depends(get_current_user)):
 @app.get("/api/export/in-progress-tickets")
 async def export_in_progress_tickets(current_user: dict = Depends(get_current_user)):
     columns = _get_ticket_columns()
-    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'in_progress' ORDER BY timestamp DESC")
+    rows = db_query(f"SELECT {columns} FROM tickets WHERE status = 'in_progress' AND (remediation_status IS NULL OR remediation_status != 'applied_not_solved') ORDER BY timestamp DESC")
 
     output = StringIO()
     if rows:
