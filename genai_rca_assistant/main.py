@@ -1353,9 +1353,9 @@ def update_slack_message_on_reopen(ticket_id: str, reason: str = "Ticket reopene
     itsm_info = f"\n*ITSM Ticket:* `{itsm_ticket_id}`" if itsm_ticket_id else ""
 
     blocks = [
-        {"type":"header","text":{"type":"plain_text","text":f"🔄 REOPENED: {title} - {severity} ({priority})"}},
+        {"type":"header","text":{"type":"plain_text","text":f"REOPENED: {title} - {severity} ({priority})"}},
         {"type":"section", "text": {"type":"mrkdwn", "text": f"*Ticket:* `{ticket_id}`{itsm_info}\n*Run ID:* `{run_id}`\n*Status:* `OPEN`"}},
-        {"type":"context", "elements": [{"type": "mrkdwn", "text": f"⚠️ {reason} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"}]},
+        {"type":"context", "elements": [{"type": "mrkdwn", "text": f"{reason} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"}]},
         {"type":"divider"},
         {"type":"section", "text": {"type":"mrkdwn", "text": f"*Root Cause:* {root}\n*Confidence:* {confidence}\n*Error Type:* `{error_type}`"}},
     ]
@@ -1374,7 +1374,7 @@ def update_slack_message_on_reopen(ticket_id: str, reason: str = "Ticket reopene
         "channel": row["slack_channel"],
         "ts": row["slack_ts"],
         "blocks": blocks,
-        "text": f"🔄 Ticket {ticket_id}: {title} - REOPENED"
+        "text": f"Ticket {ticket_id}: {title} - REOPENED"
     }
     headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
 
@@ -1891,7 +1891,7 @@ async def handle_remediation_failure(ticket_id: str, pipeline_name: str,
     - Checks if retries available
     - Triggers retry or escalates to manual
     """
-    logger.warning(f"[AUTO-REM] ❌ Auto-remediation attempt {attempt_number} failed for {ticket_id}")
+    logger.warning(f"[AUTO-REM] Auto-remediation attempt {attempt_number} failed for {ticket_id}")
 
     now = datetime.now(timezone.utc).isoformat()
     failure_reason = run_data.get("message", "Unknown failure")
@@ -2032,7 +2032,7 @@ async def send_slack_remediation_started(ticket_id: str, pipeline_name: str,
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"🤖 *Auto-remediation initiated for `{pipeline_name}`*\n"
+            "text": f"*Auto-remediation initiated for `{pipeline_name}`*\n"
                     f"Ticket: {ticket_id}\n"
                     f"Attempt: {attempt_number}/{max_retries}\n"
                     f"Action: Re-running pipeline..."
@@ -2043,7 +2043,7 @@ async def send_slack_remediation_started(ticket_id: str, pipeline_name: str,
         "channel": channel,
         "thread_ts": thread_ts,
         "blocks": blocks,
-        "text": f"🤖 Auto-remediation attempt {attempt_number} for {pipeline_name}"
+        "text": f"Auto-remediation attempt {attempt_number} for {pipeline_name}"
     }
     headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
 
@@ -2070,7 +2070,7 @@ async def send_slack_remediation_retry(ticket_id: str, pipeline_name: str,
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"🔄 *Retry attempt {attempt_number}/{max_retries}*\n"
+            "text": f"*Retry attempt {attempt_number}/{max_retries}*\n"
                     f"Previous attempt failed, retrying auto-remediation for `{pipeline_name}`..."
         }
     }]
@@ -2079,7 +2079,7 @@ async def send_slack_remediation_retry(ticket_id: str, pipeline_name: str,
         "channel": channel,
         "thread_ts": thread_ts,
         "blocks": blocks,
-        "text": f"🔄 Retry attempt {attempt_number} for {pipeline_name}"
+        "text": f"Retry attempt {attempt_number} for {pipeline_name}"
     }
     headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
 
@@ -2174,7 +2174,7 @@ async def send_slack_approval_request(ticket_id: str, pipeline_name: str,
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "⚠️ Human Approval Required for Auto-Remediation"}
+            "text": {"type": "plain_text", "text": "Human Approval Required for Auto-Remediation"}
         },
         {
             "type": "section",
@@ -2228,7 +2228,7 @@ async def send_slack_approval_request(ticket_id: str, pipeline_name: str,
             },
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "❌ Reject & Manual Fix"},
+                "text": {"type": "plain_text", "text": "Reject & Manual Fix"},
                 "style": "danger",
                 "value": f"reject_{ticket_id}",
                 "action_id": "reject_remediation"
@@ -2246,7 +2246,7 @@ async def send_slack_approval_request(ticket_id: str, pipeline_name: str,
         "channel": channel,
         "thread_ts": thread_ts,
         "blocks": blocks,
-        "text": f"⚠️ Approval required for auto-remediation of {pipeline_name}"
+        "text": f"Approval required for auto-remediation of {pipeline_name}"
     }
     headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
 
@@ -2291,7 +2291,7 @@ async def send_slack_escalation_alert(channel: str, ts: str, ticket_id: str,
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "⚠️ Auto-Remediation Failed - Manual Intervention Required"}
+            "text": {"type": "plain_text", "text": "Auto-Remediation Failed - Manual Intervention Required"}
         },
         {
             "type": "section",
@@ -2328,7 +2328,7 @@ async def send_slack_escalation_alert(channel: str, ts: str, ticket_id: str,
         "channel": channel,
         "thread_ts": ts,
         "blocks": blocks,
-        "text": f"⚠️ Auto-remediation failed for {pipeline_name} after {attempts} attempts"
+        "text": f"Auto-remediation failed for {pipeline_name} after {attempts} attempts"
     }
     headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
 
@@ -2562,8 +2562,8 @@ async def azure_monitor(request: Request):
 
     try:
         pipeline, runid, desc, metadata = AzureDataFactoryExtractor.extract(body)
-        logger.info(f"✓ Extracted via AzureDataFactoryExtractor: pipeline={pipeline}, run_id={runid}")
-        logger.info(f"✓ Error message length: {len(desc)} chars")
+        logger.info(f"Extracted via AzureDataFactoryExtractor: pipeline={pipeline}, run_id={runid}")
+        logger.info(f"Error message length: {len(desc)} chars")
         logic_app_run_id = metadata.get("logic_app_run_id", "N/A")
         processing_mode = "direct_webhook"
     except Exception as e:
@@ -2937,8 +2937,8 @@ async def remediation_callback(request: Request):
             })
 
         elif is_failed:
-            # ❌ FAILED - Retry or escalate
-            logger.warning(f"[CALLBACK] ❌ Remediation FAILED for {ticket_id}, attempt {attempt_number}")
+            # FAILED - Retry or escalate
+            logger.warning(f"[CALLBACK] Remediation FAILED for {ticket_id}, attempt {attempt_number}")
 
             await handle_remediation_failure(
                 ticket_id=ticket_id,
@@ -3035,7 +3035,7 @@ async def databricks_monitor(request: Request):
                     )
 
         except Exception as e:
-            logger.error(f"❌ Error parsing Azure Monitor cluster failure payload: {e}")
+            logger.error(f"Error parsing Azure Monitor cluster failure payload: {e}")
 
     # ===================================================================================
     # STEP 3: Databricks Job Failure Handling (Webhook or other job alerts)
@@ -3096,7 +3096,7 @@ async def databricks_monitor(request: Request):
     if run_id:
         api_fetch_attempted = True
         try:
-            logger.info(f"🔄 Fetching Databricks API details for run_id={run_id}")
+            logger.info(f"Fetching Databricks API details for run_id={run_id}")
             run_details = fetch_databricks_run_details(run_id)
 
             if run_details:
@@ -3112,7 +3112,7 @@ async def databricks_monitor(request: Request):
                 cluster_id = run_details.get("cluster_instance", {}).get("cluster_id") or cluster_id
 
         except Exception as e:
-            logger.error(f"❌ Failed API fetch for run_id={run_id}: {e}")
+            logger.error(f"Failed API fetch for run_id={run_id}: {e}")
 
     logger.info("=" * 120)
     logger.info(f"📤 FINAL ERROR SENT TO RCA ENGINE:\n{error_message[:500]}")
@@ -3193,7 +3193,7 @@ async def process_databricks_failure(job_name, run_id, job_id, cluster_id, error
         if remediation_attempt:
             original_ticket_id = remediation_attempt["ticket_id"]
             logger.warning(f"❗ This run_id ({run_id}) is a remediation attempt for ticket {original_ticket_id}")
-            logger.info(f"🔄 Remediation run failed - will be handled by callback, not creating new ticket")
+            logger.info(f"Remediation run failed - will be handled by callback, not creating new ticket")
             return {
                 "status": "remediation_run_failed",
                 "ticket_id": original_ticket_id,
@@ -3222,7 +3222,7 @@ async def process_databricks_failure(job_name, run_id, job_id, cluster_id, error
 
             if recent_remediation:
                 logger.warning(f"⏸️ Recent remediation in progress for job {job_name}, waiting for callback")
-                logger.info(f"🔄 This appears to be a retry from ongoing remediation for ticket {recent_remediation['id']}")
+                logger.info(f"This appears to be a retry from ongoing remediation for ticket {recent_remediation['id']}")
                 return {
                     "status": "remediation_in_progress",
                     "ticket_id": recent_remediation["id"],
@@ -3244,7 +3244,7 @@ async def process_databricks_failure(job_name, run_id, job_id, cluster_id, error
 
     # Detect if this is a cluster-related failure
     logger.info("=" * 80)
-    logger.info("🔍 ANALYZING ERROR FOR CLUSTER FAILURE PATTERNS")
+    logger.info("ANALYZING ERROR FOR CLUSTER FAILURE PATTERNS")
     logger.info("=" * 80)
 
     cluster_analysis = is_cluster_related_error(error_message, run_details)
@@ -3322,12 +3322,12 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
                     logger.info("=" * 80)
 
                 else:
-                    logger.warning(f"⚠️ Could not fetch cluster details for {cluster_id}")
+                    logger.warning(f"Could not fetch cluster details for {cluster_id}")
 
             except Exception as e:
-                logger.error(f"❌ Error fetching cluster information: {e}")
+                logger.error(f"Error fetching cluster information: {e}")
         else:
-            logger.warning(f"⚠️ Cluster failure detected but no cluster_id available for detailed analysis")
+            logger.warning(f"Cluster failure detected but no cluster_id available for detailed analysis")
 
     else:
         logger.info(f"ℹ️ NOT a cluster failure - likely application/data error")
@@ -3449,7 +3449,7 @@ Cluster UI: {get_cluster_ui_url(cluster_id) or 'N/A'}
                           {"url": blob_url, "id": tid})
                 logger.info(f"✅ Databricks logs uploaded to blob for ticket {tid}")
         except Exception as e:
-            logger.error(f"❌ Failed to upload Databricks logs to blob: {e}")
+            logger.error(f"Failed to upload Databricks logs to blob: {e}")
 
     # -----------------------
     # AUDIT LOG
@@ -3654,7 +3654,7 @@ async def airflow_monitor(request: Request):
         logger.info(f"   Remediable: {error_classification['is_remediable']}")
         logger.info(f"   Action: {error_classification.get('action', 'N/A')}")
     else:
-        logger.info("⚠️  Error not classified in AIRFLOW_REMEDIABLE_ERRORS")
+        logger.info(" Error not classified in AIRFLOW_REMEDIABLE_ERRORS")
 
     # ------------------------------------------
     # STEP 5: Build enriched context for RCA
@@ -3664,7 +3664,7 @@ async def airflow_monitor(request: Request):
     # ------------------------------------------
     # STEP 6: Generate RCA using Gemini (with error classification for fallback)
     # ------------------------------------------
-    logger.info("🧠 Generating RCA for Airflow failure...")
+    logger.info("Generating RCA for Airflow failure...")
     rca = generate_rca_and_recs(enriched_context, source_type="airflow", error_classification=error_classification)
 
     # ------------------------------------------
@@ -3796,7 +3796,7 @@ async def jira_webhook(request: Request):
     """
     try:
         body = await request.json()
-        logger.info(f"📥 JIRA webhook received: {json.dumps(body, indent=2)}")
+        logger.info(f"JIRA webhook received: {json.dumps(body, indent=2)}")
 
         # Extract webhook event details
         webhook_event = body.get("webhookEvent")
@@ -3938,7 +3938,7 @@ async def jira_webhook(request: Request):
             return {"status": "no_change", "message": "Status already matches"}
 
     except Exception as e:
-        logger.error(f"❌ Error processing JIRA webhook: {e}", exc_info=True)
+        logger.error(f"Error processing JIRA webhook: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
 
 ###########################################################################################################################
@@ -4317,7 +4317,7 @@ async def slack_interactions(request: Request):
                 # Get ticket details
                 ticket = db_query("SELECT * FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
                 if not ticket:
-                    return JSONResponse({"text": f"❌ Ticket {ticket_id} not found"})
+                    return JSONResponse({"text": f"Ticket {ticket_id} not found"})
 
                 # Update ticket status
                 db_execute("""UPDATE tickets
@@ -4367,12 +4367,12 @@ async def slack_interactions(request: Request):
                                  pipeline=pipeline_name, run_id=original_run_id, user_name=user_name,
                                  details="job_id required for Databricks remediation but not found in ticket data")
                         return JSONResponse({
-                            "text": f"❌ Cannot trigger remediation for {ticket_id}",
+                            "text": f"Cannot trigger remediation for {ticket_id}",
                             "blocks": [{
                                 "type": "section",
                                 "text": {
                                     "type": "mrkdwn",
-                                    "text": f"❌ *Remediation blocked*\n\nTicket: `{ticket_id}`\nReason: job_id is required but was not found in ticket data.\nPlease manually trigger the job or contact support."
+                                    "text": f"*Remediation blocked*\n\nTicket: `{ticket_id}`\nReason: job_id is required but was not found in ticket data.\nPlease manually trigger the job or contact support."
                                 }
                             }],
                             "replace_original": True
@@ -4425,7 +4425,7 @@ async def slack_interactions(request: Request):
             # Get ticket details
             ticket = db_query("SELECT * FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
             if not ticket:
-                return JSONResponse({"text": f"❌ Ticket {ticket_id} not found"})
+                return JSONResponse({"text": f"Ticket {ticket_id} not found"})
 
             # Update ticket status
             db_execute("""UPDATE tickets
@@ -4445,13 +4445,13 @@ async def slack_interactions(request: Request):
 
             # Update Slack message
             response_message = {
-                "text": f"❌ Auto-remediation rejected by {user_name}",
+                "text": f"Auto-remediation rejected by {user_name}",
                 "blocks": [
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"❌ *Auto-remediation rejected by {user_name}*\n\nTicket: `{ticket_id}` requires manual intervention.\nPipeline: `{ticket.get('pipeline')}`"
+                            "text": f"*Auto-remediation rejected by {user_name}*\n\nTicket: `{ticket_id}` requires manual intervention.\nPipeline: `{ticket.get('pipeline')}`"
                         }
                     }
                 ],
@@ -4465,7 +4465,7 @@ async def slack_interactions(request: Request):
 
     except Exception as e:
         logger.exception(f"[SLACK-INTERACTION] Error processing interaction: {e}")
-        return JSONResponse({"text": f"❌ Error: {str(e)}"}, status_code=500)
+        return JSONResponse({"text": f"Error: {str(e)}"}, status_code=500)
 
 # --- WebSocket ---
 @app.websocket("/ws")

@@ -158,9 +158,17 @@
         <option value="Logic App Forwarded">Logic App Forwarded</option>
         <option value="Auto-Remediation">Auto-Remediation</option>
       </select>
-      
-      <input type="text" id="audit-search" placeholder="Search audit logs..." onkeyup="filterAuditTable()" 
-             style="flex:1;max-width:400px;padding:8px;background:#161b22;border:1px solid #30363d;color:#e6eef6;border-radius:6px" />
+
+      <label style="color:#9aa6b2;margin-left:15px">Filter by Source:</label>
+      <select id="source-filter" onchange="filterAuditTable()">
+        <option value="all">All Sources</option>
+        <option value="adf">ADF</option>
+        <option value="databricks">Databricks</option>
+        <option value="airflow">Airflow</option>
+      </select>
+
+      <input type="text" id="audit-search" placeholder="Search audit logs..." onkeyup="filterAuditTable()"
+             style="flex:1;max-width:400px;padding:8px;background:#161b22;border:1px solid#30363d;color:#e6eef6;border-radius:6px" />
     </div>
     
     <div id="audit-table-container" class="muted">Loading audit logs...</div>
@@ -631,21 +639,34 @@ function renderAuditTable(audits){
 
 function filterAuditTable(){
   const searchTerm = document.getElementById('audit-search').value.toLowerCase();
-  if(!searchTerm){
-    renderAuditTable(auditData);
-    return;
+  const sourceFilter = document.getElementById('source-filter').value;
+
+  let filtered = auditData;
+
+  // Apply source filter
+  if(sourceFilter !== 'all'){
+    filtered = filtered.filter(a => {
+      const ticketId = a.ticket_id || '';
+      if(sourceFilter === 'adf') return ticketId.startsWith('ADF-');
+      if(sourceFilter === 'databricks') return ticketId.startsWith('DBX-');
+      if(sourceFilter === 'airflow') return ticketId.startsWith('ARF-');
+      return true;
+    });
   }
-  
-  const filtered = auditData.filter(a => {
-    return (a.ticket_id||'').toLowerCase().includes(searchTerm) ||
-           (a.pipeline||'').toLowerCase().includes(searchTerm) ||
-           (a.action||'').toLowerCase().includes(searchTerm) ||
-           (a.user_name||'').toLowerCase().includes(searchTerm) ||
-           (a.finops_team||'').toLowerCase().includes(searchTerm) ||
-           (a.itsm_ticket_id||'').toLowerCase().includes(searchTerm) ||
-           (a.details||'').toLowerCase().includes(searchTerm);
-  });
-  
+
+  // Apply search term filter
+  if(searchTerm){
+    filtered = filtered.filter(a => {
+      return (a.ticket_id||'').toLowerCase().includes(searchTerm) ||
+             (a.pipeline||'').toLowerCase().includes(searchTerm) ||
+             (a.action||'').toLowerCase().includes(searchTerm) ||
+             (a.user_name||'').toLowerCase().includes(searchTerm) ||
+             (a.finops_team||'').toLowerCase().includes(searchTerm) ||
+             (a.itsm_ticket_id||'').toLowerCase().includes(searchTerm) ||
+             (a.details||'').toLowerCase().includes(searchTerm);
+    });
+  }
+
   renderAuditTable(filtered);
 }
 
